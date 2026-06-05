@@ -204,7 +204,7 @@ class HidenCloudRenewer:
         co.set_argument('--no-default-browser-check')
         co.set_argument('--window-size=1280,1024')
         
-        co.headless(False)  # 配合 xvfb 运行有头模式
+        co.headless(False)  # 有头配合 xvfb 运行更稳定
         
         profile_path = os.path.join(os.getcwd(), 'hiden_browser_profile')
         co.set_user_data_path(profile_path)
@@ -226,45 +226,60 @@ class HidenCloudRenewer:
         page.get(self.LOGIN_URL)
         time.sleep(2)
         
-        # 缓存检查 1：开局是否直接进入后台
+        # 缓存检查 1
         if 'dashboard' in page.url or 'service' in page.url:
-            log(f"✨ [{self.email}] 浏览器本地缓存有效，已处于登录后台！")
+            log(f"✨ [{self.email}] 缓存有效，已处于后台！")
             return True
 
         solver.solve(timeout=8) 
         time.sleep(random.uniform(2, 4))
 
-        # 缓存检查 2：过盾后是否自动跳转
+        # 缓存检查 2
         if 'dashboard' in page.url or 'service' in page.url:
-            log(f"✨ [{self.email}] 过盾后自动进入控制台后台！")
+            log(f"✨ [{self.email}] 过盾后自动进入后台！")
             return True
 
+        # ═════════════════════════════════════════════
+        #  🎯【精细修复】：重构表单账号密码填写机制
+        # ═════════════════════════════════════════════
         try:
-            email_ele = (
-                page.ele('css:input[type="email"]', timeout=10) or 
-                page.ele('css:input[name*="email"]') or
-                page.ele('css:input[placeholder*="Email"]')
+            # 采用 CSS 组合选择器，通杀 username / email / text 类型输入框，且利用 :not 彻底排除隐藏的 token 域
+            email_ele = page.ele(
+                'css:input[name="username"]:not([type="hidden"]), '
+                'input[name="email"]:not([type="hidden"]), '
+                'input[type="email"], '
+                'input[placeholder*="Email" i], '
+                'input[placeholder*="Username" i]', 
+                timeout=12
             )
             if not email_ele:
-                raise Exception("无法定位账号输入框")
+                raise Exception("无法定位到账号/用户名输入框")
                 
             email_ele.click()
-            email_ele.clear()
+            # 采用全选清空，防止底层 .clear() 触发失败
+            page.actions.key_down('control').send_key('a').key_up('control').send_key('backspace')
+            time.sleep(0.3)
+            
+            # 仿真打字输入用户名
             for char in self.email:
                 email_ele.input(char, clear=False)
-                time.sleep(random.uniform(0.04, 0.10))
+                time.sleep(random.uniform(0.02, 0.06))
+            log("✍️ 用户名/邮箱字段已顺利填入")
             
-            pwd_ele = (
-                page.ele('css:input[type="password"]') or
-                page.ele('css:input[name*="password"]') or
-                page.ele('css:input[placeholder*="Password"]')
-            )
-            if pwd_ele:
-                pwd_ele.click()
-                pwd_ele.clear()
-                for char in self.password:
-                    pwd_ele.input(char, clear=False)
-                    time.sleep(random.uniform(0.04, 0.10))
+            # 寻找密码框
+            pwd_ele = page.ele('css:input[type="password"], input[name="password"]', timeout=6)
+            if not pwd_ele:
+                raise Exception("无法定位到密码输入框")
+                
+            pwd_ele.click()
+            page.actions.key_down('control').send_key('a').key_up('control').send_key('backspace')
+            time.sleep(0.3)
+            
+            # 仿真打字输入密码
+            for char in self.password:
+                pwd_ele.input(char, clear=False)
+                time.sleep(random.uniform(0.02, 0.06))
+            log("✍️ 密码字段已顺利填入")
             
         except Exception as e:
             log(f"❌ 填写表单失败: {e}，当前页 URL: {page.url}")
@@ -273,20 +288,24 @@ class HidenCloudRenewer:
             send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, f"❌ <b>{self.email}</b> 填写表单失败: {e}\nURL: {page.url}")
             return False
 
+        # 再次确认过盾情况
         solver.solve()
 
         if 'dashboard' in page.url or 'service' in page.url:
-            log(f"✅ [{self.email}] 登录成功")
+            log(f"✅ [{self.email}] 成功进入主页")
             return True
 
+        # 点击登录提交按钮
         try:
             btn = (
                 page.ele('css:button[type="submit"]') or 
                 page.ele('xpath://button[contains(text(),"Sign in")]') or
-                page.ele('xpath://button[contains(text(),"登录")]')
+                page.ele('xpath://button[contains(text(),"登录")]') or
+                page.ele('css:.btn-primary')
             )
             if btn:
                 btn.click()
+                log("🖱️ 已点击登录提交按钮")
         except Exception as e:
             log(f"❌ 点击登录按钮失败: {e}")
             return False
@@ -297,7 +316,7 @@ class HidenCloudRenewer:
             log(f"✅ [{self.email}] 登录成功")
             return True
 
-        log(f"❌ [{self.email}] 登录失败，当前 URL: {page.url}")
+        log(f"❌ [{self.email}] 登录终审失败，当前 URL: {page.url}")
         pic_path = f"err_login_{self.safe_email}.png"
         page.get_screenshot(path=pic_path)
         send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, f"❌ <b>{self.email}</b> 登录失败\nURL: {page.url}")
@@ -332,36 +351,33 @@ class HidenCloudRenewer:
         page.get(manage_url)
         time.sleep(4)
 
-        # 提前获取页面上的 _token，防备 API 兜底使用
         token = ''
         token_ele = page.ele('css:input[name="_token"]')
         if token_ele:
             token = token_ele.value
 
-        # ═════════════════════════════════════════════
-        #  🔥【全新升级】：1:1 专属 UI 弹窗连续点击流
-        # ═════════════════════════════════════════════
         ui_success = False
         try:
-            # 1. 精准寻找页面上的绿色 "Renew" 按钮
+            # 模糊文本 + 全标签扫描外部 "Renew" 按钮
             renew_btn = (
-                page.ele('text=Renew', timeout=5) or 
-                page.ele('xpath://button[contains(text(),"Renew")]') or
-                page.ele('css:button.btn-success')
+                page.ele('text:Renew', timeout=5) or 
+                page.ele('xpath://*[contains(text(),"Renew")]') or
+                page.ele('css:.btn-success') or
+                page.ele('css:[href*="renew"]')
             )
             if not renew_btn:
                 raise Exception("无法定位页面的 'Renew' 按钮")
             
             renew_btn.click()
             log("🖱️ 已成功点击外部 'Renew' 按钮，等待模态框弹出...")
-            time.sleep(2.5)
+            time.sleep(3)
 
-            # 2. 定位弹窗中的橙色 "Create Invoice" 按钮
+            # 定位弹窗中的橙色 "Create Invoice" 确认开票按钮
             invoice_btn = (
-                page.ele('text=Create Invoice', timeout=5) or
-                page.ele('xpath://button[contains(text(),"Create Invoice")]') or
-                page.ele('css:button.btn-warning') or 
-                page.ele('css:button[type="submit"]')
+                page.ele('text:Create Invoice', timeout=5) or
+                page.ele('xpath://*[contains(text(),"Create Invoice")]') or
+                page.ele('css:.btn-warning') or 
+                page.ele('css:[type="submit"]')
             )
             if not invoice_btn:
                 raise Exception("无法定位模态框中的 'Create Invoice' 按钮")
@@ -370,8 +386,8 @@ class HidenCloudRenewer:
             log("🖱️ 已成功点击模态框中的 'Create Invoice' 按钮，正在开票...")
             time.sleep(5)
 
-            # 3. 校验最终结果（是否跳转到发票页，或页面出现成功提示）
-            if 'invoice' in page.url or page.ele('text=Invoice created successfully'):
+            # 校验最终结果
+            if 'invoice' in page.url or page.ele('text:Invoice') or page.ele('text:success'):
                 m = re.search(r'/invoice/([a-f0-9\-]+)', page.url)
                 invoice_id = m.group(1)[:8] if m else 'SUCCESS'
                 
@@ -382,7 +398,6 @@ class HidenCloudRenewer:
                 
                 log(f"🎉 [{self.email}] 服务 #{service_id} UI 续期成功！发票ID: {invoice_id}")
                 
-                # 📸 成功截图留档
                 pic_path = f"success_ui_{service_id}_{self.safe_email}.png"
                 page.get_screenshot(path=pic_path)
                 send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, 
@@ -392,14 +407,11 @@ class HidenCloudRenewer:
         except Exception as ui_err:
             log(f"⚠️ UI 点击流遇到阻碍: {ui_err}")
 
-        # ═════════════════════════════════════════════
-        #  📡【API POST 保底方案】
-        # ═════════════════════════════════════════════
+        # API POST 保底方案
         if not ui_success:
             log(f"📡 #{service_id} 启动底层 API POST 保底续期策略...")
             try:
                 s = requests.Session()
-                # 转移浏览器内的最新 Cookies
                 for ck in page.cookies():
                     s.cookies.set(ck.get('name', ''), ck.get('value', ''), domain=ck.get('domain', ''))
 
@@ -410,13 +422,11 @@ class HidenCloudRenewer:
                     'User-Agent': page.user_agent
                 }
                 
-                # 配置代理
                 proxies = None
                 if self.proxy:
                     p_str = self.proxy if "://" in self.proxy else f"socks5://{self.proxy}"
                     proxies = {'http': p_str, 'https': p_str}
 
-                # 发起真实数据包提交 (包含7天周期的参数)
                 post_data = {'_token': token, 'days': '7'}
                 resp = s.post(f"{self.BASE}/service/{service_id}/renew", data=post_data, headers=headers, proxies=proxies, timeout=20)
 
@@ -427,7 +437,6 @@ class HidenCloudRenewer:
                     result['message'] = '续期成功（POST保底）'
                     result['invoice_id'] = invoice_id
                     
-                    # 重新刷新页面以截取最新的成功面板
                     page.get(manage_url)
                     time.sleep(2)
                     pic_path = f"success_post_{service_id}_{self.safe_email}.png"
