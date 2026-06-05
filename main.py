@@ -89,84 +89,45 @@ class TurnstileSolver:
         self.page = page
 
     def solve(self, timeout: int = 25) -> bool:
-        log("🛡️ 开始处理 Cloudflare Turnstile...")
-
-        # 1. 检查是否自动通过
-        for i in range(4):
+        log("🛡️ 检测 Cloudflare 状态...")
+        for i in range(5):
             try:
                 resp = self.page.ele('css:[name="cf-turnstile-response"]', timeout=1)
                 if resp and resp.value:
-                    log(f"⚡ [自动通过] Token 已存在，无需点击 (耗时 {i}s)")
+                    log(f"⚡ Token 已存在，无需点击")
                     return True
-            except Exception:
+            except:
                 pass
             time.sleep(1)
 
-        # 2. 锁定 iframe
         iframe = None
         for selector in [
             'css:iframe[src^="https://challenges.cloudflare.com"]',
             'css:iframe[id^="cf-chl-widget-"]',
         ]:
             try:
-                iframe = self.page.get_frame(selector, timeout=5)
+                iframe = self.page.get_frame(selector, timeout=3)
                 if iframe:
                     break
-            except Exception:
+            except:
                 pass
 
         if not iframe:
-            log("❌ 找不到 Turnstile iframe")
-            resp = self.page.ele('css:[name="cf-turnstile-response"]', timeout=1)
-            return True if (resp and resp.value) else False
+            return True
 
-        time.sleep(random.uniform(1.5, 2.5))
-
-        click_success = False
-        # 3. 穿透 Shadow Root 执行带偏移量物理点击
         try:
             body = iframe.ele('tag:body')
             sr = body.shadow_root if body else None
             if sr:
-                target = (
-                    sr.ele('css:input[type="checkbox"]') or
-                    sr.ele('css:#challenge-stage') or
-                    sr.ele('css:div.main-wrapper') or
-                    sr.ele('css:#content')
-                )
+                target = sr.ele('css:input[type="checkbox"]') or sr.ele('css:#challenge-stage')
                 if target:
-                    log("鼠标在 ShadowRoot 内部找到目标，执行带偏移量的物理点击...")
                     target.click.at(offset_x=10, offset_y=10)
-                    click_success = True
-        except Exception as e:
-            log(f"⚠️ Shadow Root 穿透点击失败: {e}")
-
-        # 4. 保底方案：Iframe 坐标盲点
-        if not click_success:
-            log("🏹 [保底方案] 执行 Iframe 坐标偏移盲点...")
-            try:
-                iframe.frame_ele.click.at(offset_x=25, offset_y=30)
-                click_success = True
-            except Exception as e:
-                log(f"❌ 盲点失败: {e}")
-
-        if not click_success:
-            return False
-
-        # 5. 等待验证结果
-        log("⏳ 点击已执行，等待验证通过...")
-        for i in range(timeout):
-            time.sleep(1)
-            try:
-                resp = self.page.ele('css:[name="cf-turnstile-response"]', timeout=1)
-                if resp and resp.value:
-                    log(f"🎉 过盾成功！Token 已注入 (总耗时 {i+1}s)")
+                    time.sleep(2)
                     return True
-            except Exception:
-                pass
+        except:
+            pass
 
-        log("⚠️ Turnstile 等待超时")
-        return False
+        return True
 
 
 # ─────────────────────────────────────────────
@@ -196,15 +157,9 @@ class HidenCloudRenewer:
         co.set_argument('--disable-gpu')
         co.set_argument('--disable-dev-shm-usage')
         co.set_argument('--disable-setuid-sandbox') 
-        co.set_argument('--disable-software-rasterizer')
-        co.set_argument('--disable-extensions')
-        co.set_argument('--disable-popup-blocking')
-        co.set_argument('--ignore-certificate-errors')
-        co.set_argument('--no-first-run')
-        co.set_argument('--no-default-browser-check')
         co.set_argument('--window-size=1280,1024')
         
-        co.headless(False)  # 有头配合 xvfb 运行更稳定
+        co.headless(False)
         
         profile_path = os.path.join(os.getcwd(), 'hiden_browser_profile')
         co.set_user_data_path(profile_path)
@@ -224,66 +179,87 @@ class HidenCloudRenewer:
         solver = TurnstileSolver(page)
 
         page.get(self.LOGIN_URL)
-        time.sleep(2)
+        time.sleep(3)
         
-        # 缓存检查 1
         if 'dashboard' in page.url or 'service' in page.url:
-            log(f"✨ [{self.email}] 缓存有效，已处于后台！")
+            log(f"✨ [{self.email}] 缓存有效，已直达后台！")
             return True
 
-        solver.solve(timeout=8) 
-        time.sleep(random.uniform(2, 4))
+        solver.solve() 
+        time.sleep(3)  # 给充足的表单渲染时间
 
-        # 缓存检查 2
         if 'dashboard' in page.url or 'service' in page.url:
-            log(f"✨ [{self.email}] 过盾后自动进入后台！")
+            log(f"✨ [{self.email}] 自动重定向进入后台！")
             return True
 
         # ═════════════════════════════════════════════
-        #  🎯【针对性修复】：根据 F12 结构精确定位输入框
+        #  🎯【针对性大修】：完全独立的单步级联查找机制
         # ═════════════════════════════════════════════
         try:
-            # 1. 寻找账号输入框：优先使用截图中的 id="email"，并用中文 placeholder 做保底
-            email_ele = page.ele(
-                'css:input#email, '
-                'input[id="email"], '
-                'input[placeholder*="邮箱"], '
-                'input[placeholder*="邮"]', 
-                timeout=12
-            )
+            log(f"当前页面标题: [{page.title}]，开始单步探测输入框...")
+            
+            # 1. 寻找账号输入框
+            email_ele = None
+            email_selectors = [
+                '#email',                 # 方案 A: 极简 ID 寻找
+                'tag:input@id=email',      # 方案 B: 精确属性寻找
+                'css:input[id="email"]',   # 方案 C: 标准 CSS
+                '@placeholder*邮箱',       # 方案 D: 模糊提示词
+                'tag:input'                # 方案 E: 兜底页面第一个输入框
+            ]
+            
+            for sel in email_selectors:
+                try:
+                    el = page.ele(sel, timeout=1)
+                    if el and el.is_displayed:
+                        email_ele = el
+                        log(f"🎯 账号框精确定位成功，匹配选择器: [{sel}]")
+                        break
+                except:
+                    pass
+
             if not email_ele:
-                raise Exception("无法定位到账号/用户名输入框")
+                raise Exception("页面上所有已知的账号输入框定位方法均告失败")
                 
             email_ele.click()
-            # 组合物理键全选清空
             page.actions.key_down('control').send_key('a').key_up('control').send_key('backspace')
-            time.sleep(0.3)
+            time.sleep(0.2)
             
-            # 仿真打字输入用户名
             for char in self.email:
                 email_ele.input(char, clear=False)
-                time.sleep(random.uniform(0.02, 0.06))
-            log("✍️ 用户名/邮箱字段已顺利填入")
+                time.sleep(random.uniform(0.01, 0.04))
             
-            # 2. 寻找密码输入框：优先使用截图中的 id="password"
-            pwd_ele = page.ele(
-                'css:input#password, '
-                'input[id="password"], '
-                'input[type="password"]', 
-                timeout=6
-            )
+            # 2. 寻找密码输入框
+            pwd_ele = None
+            pwd_selectors = [
+                '#password',
+                'tag:input@id=password',
+                'css:input[id="password"]',
+                'css:input[type="password"]'
+            ]
+            
+            for sel in pwd_selectors:
+                try:
+                    el = page.ele(sel, timeout=1)
+                    if el and el.is_displayed:
+                        pwd_ele = el
+                        log(f"🎯 密码框精确定位成功，匹配选择器: [{sel}]")
+                        break
+                except:
+                    pass
+
             if not pwd_ele:
-                raise Exception("无法定位到密码输入框")
+                raise Exception("页面上所有已知的密码输入框定位方法均告失败")
                 
             pwd_ele.click()
             page.actions.key_down('control').send_key('a').key_up('control').send_key('backspace')
-            time.sleep(0.3)
+            time.sleep(0.2)
             
-            # 仿真打字输入密码
             for char in self.password:
                 pwd_ele.input(char, clear=False)
-                time.sleep(random.uniform(0.02, 0.06))
-            log("✍️ 密码字段已顺利填入")
+                time.sleep(random.uniform(0.01, 0.04))
+                
+            log("✍️ 账号与密码表单字段已全部填入完成")
             
         except Exception as e:
             log(f"❌ 填写表单失败: {e}，当前页 URL: {page.url}")
@@ -292,27 +268,32 @@ class HidenCloudRenewer:
             send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, f"❌ <b>{self.email}</b> 填写表单失败: {e}\nURL: {page.url}")
             return False
 
-        # 再次确认过盾情况
-        solver.solve()
+        # 3. 寻找并点击登录按钮
+        btn_ele = None
+        btn_selectors = [
+            'css:button[type="submit"]',
+            'text:登录',
+            'xpath://button[contains(text(),"登录")]',
+            'css:.btn-primary'
+        ]
+        for sel in btn_selectors:
+            try:
+                el = page.ele(sel, timeout=1)
+                if el:
+                    btn_ele = el
+                    break
+            except:
+                pass
 
-        if 'dashboard' in page.url or 'service' in page.url:
-            log(f"✅ [{self.email}] 成功进入主页")
-            return True
-
-        # 点击登录提交按钮
-        try:
-            btn = (
-                page.ele('css:button[type="submit"]') or 
-                page.ele('text:登录') or
-                page.ele('xpath://button[contains(text(),"登录")]') or
-                page.ele('css:.btn-primary')
-            )
-            if btn:
-                btn.click()
-                log("🖱️ 已点击登录提交按钮")
-        except Exception as e:
-            log(f"❌ 点击登录按钮失败: {e}")
-            return False
+        if btn_ele:
+            try:
+                btn_ele.click()
+                log(" Northrop 🖱️ 已成功点击登录提交按钮")
+            except Exception as click_e:
+                log(f"⚠️ 点击登录按钮遭遇阻碍: {click_e}")
+        else:
+            log("⚠️ 未捕获到明显的登录按钮，尝试直接回车提交表单")
+            page.actions.send_key('Enter')
 
         time.sleep(5)
 
@@ -320,10 +301,10 @@ class HidenCloudRenewer:
             log(f"✅ [{self.email}] 登录成功")
             return True
 
-        log(f"❌ [{self.email}] 登录终审失败，当前 URL: {page.url}")
+        log(f"❌ [{self.email}] 登录判定未通过，当前 URL: {page.url}")
         pic_path = f"err_login_{self.safe_email}.png"
         page.get_screenshot(path=pic_path)
-        send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, f"❌ <b>{self.email}</b> 登录失败\nURL: {page.url}")
+        send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, f"❌ <b>{self.email}</b> 登录判定失败\nURL: {page.url}")
         return False
 
     def get_services(self) -> list[dict]:
@@ -447,11 +428,7 @@ class HidenCloudRenewer:
                 else:
                     result['message'] = f'POST 反馈异常，状态码: {resp.status_code}'
             except Exception as post_err:
-                err_msg = str(post_err)
-                if "Missing dependencies for SOCKS support" in err_msg:
-                    result['message'] = 'Python缺失pysocks依赖库，请运行 pip install pysocks'
-                else:
-                    result['message'] = f'POST 异常: {err_msg}'
+                result['message'] = f'POST 异常: {str(post_err)}'
 
         if not result['success']:
             log(f"❌ #{service_id} 续期最终判定失败: {result['message']}")
