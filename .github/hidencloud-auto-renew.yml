@@ -1,0 +1,154 @@
+name: HidenCloud Auto Renew
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 1'  # 初始值，运行后会自动更新
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            google-chrome-stable \
+            unzip \
+            xvfb \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm2 \
+            libxkbcommon0 \
+            libgbm1 \
+            libasound2t64 \
+            libatspi2.0-0 \
+            libxshmfence1 \
+            fonts-liberation
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install DrissionPage requests
+
+      - name: Setup Xray Proxy
+        run: |
+          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -o xray.zip
+          chmod +x xray
+
+          cat << 'XEOF' > config.json
+          ${{ secrets.XRAY_CONFIG_JSON }}
+          XEOF
+
+          if [ ! -s config.json ]; then
+            echo "❌ Error: XRAY_CONFIG_JSON is empty!"
+            exit 1
+          fi
+
+          ./xray -c config.json > xray_log.txt 2>&1 &
+          sleep 12
+
+          if ps aux | grep -v grep | grep -q "./xray"; then
+            echo "✅ Xray 进程运行中"
+          else
+            echo "❌ Xray 启动失败"
+            cat xray_log.txt
+            exit 1
+          fi
+
+      - name: Run Renewal Script
+        env:
+          ACCOUNTS:     ${{ secrets.ACCOUNTS }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
+          PROXY:        "127.0.0.1:10808"
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python main.py
+
+      # ── 运行完毕后，生成下次的随机 cron 并写回 yml ──────────────────────
+      - name: Schedule next random run
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          python3 - <<'PYEOF'
+          import random, re, subprocess, os
+
+          # 随机选 2 个不相邻的星期（间隔 ≥ 2 天，且不跨周首尾相接）
+          def pick_two_days():
+              while True:
+                  days = sorted(random.sample(range(7), 2))
+                  d0, d1 = days
+                  # 正向间隔 ≥ 2，且不出现 0和6 相邻的情况
+                  if (d1 - d0) >= 2 and not (d0 == 0 and d1 == 6):
+                      return d0, d1
+
+          d0, d1 = pick_two_days()
+
+          # 随机小时：北京时间 8~22 点之间（UTC 0~14）
+          h0 = random.randint(0, 14)
+          h1 = random.randint(0, 14)
+          m0 = random.randint(0, 59)
+          m1 = random.randint(0, 59)
+
+          # GitHub Actions cron: 星期用 0=Sun,1=Mon,...,6=Sat
+          # Python weekday(): 0=Mon,...,6=Sun → 转换：(d+1)%7
+          cron0 = f"{m0} {h0} * * {(d0+1)%7}"
+          cron1 = f"{m1} {h1} * * {(d1+1)%7}"
+
+          day_names = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
+          print(f"下次执行: {day_names[d0]} UTC {h0:02d}:{m0:02d}  |  {day_names[d1]} UTC {h1:02d}:{h1:02d}")
+          print(f"  cron0: {cron0}")
+          print(f"  cron1: {cron1}")
+
+          # 读取并替换 yml 中的 cron 行
+          yml_path = ".github/workflows/hidencloud-auto-renew.yml"
+          with open(yml_path, "r") as f:
+              content = f.read()
+
+          # 替换所有 cron 行（保留缩进和注释前缀）
+          new_block = (
+              f"    - cron: '{cron0}'  # {day_names[d0]} 北京时间 {(h0+8)%24:02d}:{m0:02d}\n"
+              f"    - cron: '{cron1}'  # {day_names[d1]} 北京时间 {(h1+8)%24:02d}:{m1:02d}"
+          )
+          content = re.sub(
+              r"( *- cron: '[^']*'[^\n]*\n)+ *- cron: '[^']*'[^\n]*",
+              new_block,
+              content,
+              count=1
+          )
+
+          with open(yml_path, "w") as f:
+              f.write(content)
+
+          print("✅ yml 已更新")
+          PYEOF
+
+          # git commit & push
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/hidencloud-auto-renew.yml
+          git diff --cached --quiet || git commit -m "chore: update next renew schedule [skip ci]"
+          git push
+
+      - name: Upload Debug Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs-and-screenshots
+          path: |
+            *.png
+            xray_log.txt
+          retention-days: 3
