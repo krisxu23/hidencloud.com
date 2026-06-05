@@ -186,41 +186,81 @@ class HidenCloudRenewer:
         log(f"🔐 [{self.email}] 开始登录...")
         self.page = self._make_page()
         page = self.page
+        solver = TurnstileSolver(page)
 
         page.get(self.LOGIN_URL)
-        time.sleep(random.uniform(2, 3))
+        
+        # 1. 前置 Cloudflare 检查：如果遇到 5 秒盾全局拦截，先过盾
+        log(f"🛡️ [{self.email}] 检查前置 Cloudflare 防护...")
+        solver.solve(timeout=8) 
+        
+        # 等待页面渲染
+        time.sleep(random.uniform(2, 4))
 
-        # 填写表单
+        # 2. 填写表单（使用更鲁棒的定位方式）
         try:
-            page.ele('css:input[name="email"], css:input[name="username"]').input(self.email)
+            # 账号框：支持 type=email，或名字包含 email/username，或利用文字标签定位
+            email_ele = (
+                page.ele('css:input[type="email"]', timeout=10) or 
+                page.ele('css:input[name*="email"]') or 
+                page.ele('css:input[name*="username"]') or 
+                page.ele('xpath://*[contains(text(), "Email")]/following::input[1]')
+            )
+            
+            if not email_ele:
+                raise Exception("等待 10 秒后仍未找到账号输入框")
+                
+            email_ele.clear()
+            email_ele.input(self.email)
             time.sleep(random.uniform(0.3, 0.7))
-            page.ele('css:input[name="password"]').input(self.password)
+            
+            # 密码框
+            pwd_ele = (
+                page.ele('css:input[type="password"]') or 
+                page.ele('css:input[name*="password"]') or 
+                page.ele('xpath://*[contains(text(), "Password")]/following::input[1]')
+            )
+            if pwd_ele:
+                pwd_ele.clear()
+                pwd_ele.input(self.password)
             time.sleep(random.uniform(0.3, 0.7))
+            
         except Exception as e:
             log(f"❌ [{self.email}] 填写表单失败: {e}")
+            # 截图留证
+            debug_pic = f"error_login_{self.email.replace('@','_')}.png"
+            try:
+                page.get_screenshot(path=debug_pic)
+                log(f"📸 已保存错误现场截图至: {debug_pic}")
+            except Exception:
+                pass
             return False
 
-        # 破解 Turnstile
-        solver = TurnstileSolver(page)
+        # 3. 破解表单层 Turnstile（如果之前的前置检查没用到）
         ok = solver.solve()
         if not ok:
             log(f"⚠️ [{self.email}] Turnstile 未通过，尝试直接提交...")
 
-        # 提交登录
+        # 4. 提交登录
         try:
             btn = (
-                page.ele('css:button[type="submit"]') or
                 page.ele('xpath://button[contains(text(),"Sign in")]') or
-                page.ele('xpath://button[contains(text(),"登录")]')
+                page.ele('xpath://button[contains(text(),"Login")]') or
+                page.ele('xpath://button[contains(text(),"登录")]') or
+                page.ele('css:button[type="submit"]')
             )
-            btn.click()
+            if btn:
+                btn.click()
+            else:
+                log(f"❌ [{self.email}] 找不到登录按钮")
+                return False
         except Exception as e:
             log(f"❌ [{self.email}] 点击登录按钮失败: {e}")
             return False
 
         time.sleep(random.uniform(3, 5))
 
-        # 验证是否登录成功
+        # 5. 验证是否登录成功
         if 'dashboard' in page.url or 'service' in page.url:
             log(f"✅ [{self.email}] 登录成功")
             return True
