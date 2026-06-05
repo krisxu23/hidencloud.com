@@ -3,14 +3,13 @@ import re
 import sys
 import time
 import random
-import json
 import requests
 from datetime import datetime
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 
 # ─────────────────────────────────────────────
-#  工具函数
+#  工具函数（支持文字与图片发送）
 # ─────────────────────────────────────────────
 
 def log(msg: str):
@@ -18,7 +17,7 @@ def log(msg: str):
 
 
 def send_tg(token: str, chat_id: str, text: str):
-    """发送 Telegram 通知"""
+    """发送 Telegram 纯文字通知"""
     if not token or not chat_id:
         return
     try:
@@ -29,11 +28,38 @@ def send_tg(token: str, chat_id: str, text: str):
             "parse_mode": "HTML"
         }, timeout=15)
         if resp.status_code == 200:
-            log("📤 Telegram 通知已发送")
+            log("📤 Telegram 文字通知已发送")
         else:
-            log(f"⚠️ Telegram 发送失败: {resp.text[:100]}")
+            log(f"⚠️ Telegram 文字发送失败: {resp.text[:100]}")
     except Exception as e:
-        log(f"❌ Telegram 异常: {e}")
+        log(f"❌ Telegram 文字异常: {e}")
+
+
+def send_tg_photo(token: str, chat_id: str, photo_path: str, caption: str = ""):
+    """发送 Telegram 图片通知（带文字介绍）"""
+    if not token or not chat_id:
+        return
+    if not os.path.exists(photo_path):
+        log(f"⚠️ 未找到待发送的截图文件: {photo_path}")
+        return
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendPhoto"
+        with open(photo_path, 'rb') as f:
+            files = {'photo': f}
+            data = {
+                'chat_id': chat_id,
+                'caption': caption,
+                'parse_mode': 'HTML'
+            }
+            resp = requests.post(url, data=data, files=files, timeout=25)
+        if resp.status_code == 200:
+            log(f"📤 Telegram 截图已成功发送: {os.path.basename(photo_path)}")
+            # 发送成功后删除本地临时文件
+            os.remove(photo_path)
+        else:
+            log(f"⚠️ Telegram 图片发送失败: {resp.text[:100]}")
+    except Exception as e:
+        log(f"❌ Telegram 图片发送异常: {e}")
 
 
 def parse_accounts(raw: str) -> list[tuple[str, str]]:
@@ -56,7 +82,7 @@ def parse_accounts(raw: str) -> list[tuple[str, str]]:
 
 
 # ─────────────────────────────────────────────
-#  Turnstile 破解器（融合 Weirdhost 优秀算法）
+#  Turnstile 破解器
 # ─────────────────────────────────────────────
 
 class TurnstileSolver:
@@ -98,7 +124,7 @@ class TurnstileSolver:
         time.sleep(random.uniform(1.5, 2.5))
 
         click_success = False
-        # 3. 穿透 Closed Shadow Root 并使用【带坐标偏移的物理点击】
+        # 3. 穿透 Closed Shadow Root 并使用物理轨迹点击
         try:
             body = iframe.ele('tag:body')
             sr = body.shadow_root if body else None
@@ -153,20 +179,20 @@ class HidenCloudRenewer:
     LOGIN_URL = f"{BASE}/auth/login"
     DASHBOARD_URL = f"{BASE}/dashboard"
 
-    def __init__(self, email: str, password: str, proxy: str = ""):
+    def __init__(self, email: str, password: str, proxy: str = "", tg_token: str = "", tg_chat_id: str = ""):
         self.email = email
         self.password = password
         self.proxy = proxy
+        self.tg_token = tg_token
+        self.tg_chat_id = tg_chat_id
         self.page: ChromiumPage | None = None
+        self.safe_email = email.replace('@', '_').replace('.', '_')
 
     def _make_page(self) -> ChromiumPage:
         co = ChromiumOptions()
-        
-        # 针对 Linux 环境可指定 Chrome 路径（如本地运行可注释此行）
         if os.path.exists('/usr/bin/google-chrome'):
             co.set_browser_path('/usr/bin/google-chrome')
             
-        # 融合 Weirdhost 规避高强度风控的核心参数
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-gpu')
         co.set_argument('--disable-dev-shm-usage')
@@ -179,10 +205,9 @@ class HidenCloudRenewer:
         co.set_argument('--no-default-browser-check')
         co.set_argument('--window-size=1280,1024')
         
-        # 【核心技巧】关闭无头模式，伪装成真实有头浏览器
+        # 真实浏览器有头模式（配合 xvfb 运行）
         co.headless(False)
         
-        # 保持持久化缓存目录
         profile_path = os.path.join(os.getcwd(), 'hiden_browser_profile')
         co.set_user_data_path(profile_path)
         co.auto_port()
@@ -201,41 +226,76 @@ class HidenCloudRenewer:
         solver = TurnstileSolver(page)
 
         page.get(self.LOGIN_URL)
+        time.sleep(2)
         
-        # 前置检查
+        # 🔥【新增优化 1】：检查是否因持久化缓存，开局就已经是自动登录状态
+        if 'dashboard' in page.url or 'service' in page.url:
+            log(f"✨ [{self.email}] 浏览器本地缓存生效，检测到已处于登录后台，跳过表单填写！")
+            return True
+
+        # 前置防护检查
         solver.solve(timeout=8) 
         time.sleep(random.uniform(2, 4))
 
+        # 🔥【新增优化 2】：过盾后再次检查是否因为 Cookie 自动跳转进了后台
+        if 'dashboard' in page.url or 'service' in page.url:
+            log(f"✨ [{self.email}] 过盾后自动跳转至控制台后台，判定登录成功！")
+            return True
+
         try:
-            email_ele = page.ele('css:input[type="email"]', timeout=10) or page.ele('css:input[name*="email"]')
+            # 增强版多重选择器，提升容错率
+            email_ele = (
+                page.ele('css:input[type="email"]', timeout=10) or 
+                page.ele('css:input[name*="email"]') or
+                page.ele('css:input[name*="username"]') or
+                page.ele('css:input[placeholder*="邮箱"]') or
+                page.ele('css:input[placeholder*="Email"]')
+            )
             if not email_ele:
-                raise Exception("找不到账号输入框")
+                raise Exception("无法在当前页面定位到账号输入框")
                 
-            # 模拟人类慢速输入
             email_ele.click()
             email_ele.clear()
             for char in self.email:
                 email_ele.input(char, clear=False)
-                time.sleep(random.uniform(0.05, 0.15))
+                time.sleep(random.uniform(0.05, 0.12))
             
-            pwd_ele = page.ele('css:input[type="password"]')
+            pwd_ele = (
+                page.ele('css:input[type="password"]') or
+                page.ele('css:input[name*="password"]') or
+                page.ele('css:input[placeholder*="密码"]') or
+                page.ele('css:input[placeholder*="Password"]')
+            )
             if pwd_ele:
                 pwd_ele.click()
                 pwd_ele.clear()
                 for char in self.password:
                     pwd_ele.input(char, clear=False)
-                    time.sleep(random.uniform(0.05, 0.15))
+                    time.sleep(random.uniform(0.05, 0.12))
             
         except Exception as e:
-            log(f"❌ 填写表单失败: {e}")
+            log(f"❌ 填写表单失败: {e}，当前页 URL: {page.url}")
+            # 📸 失败截屏并发送
+            pic_path = f"err_form_{self.safe_email}.png"
+            page.get_screenshot(path=pic_path)
+            send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, f"❌ <b>{self.email}</b> 填写表单失败: {e}\n当前页面URL: {page.url}")
             return False
 
-        # 破译登录表单 Turnstile
+        # 破译登录表单级别的 Turnstile
         solver.solve()
 
-        # 提交
+        # 提交前最后确认一次状态
+        if 'dashboard' in page.url or 'service' in page.url:
+            log(f"✅ [{self.email}] 登录成功")
+            return True
+
+        # 点击提交按钮
         try:
-            btn = page.ele('css:button[type="submit"]') or page.ele('xpath://button[contains(text(),"Sign in")]')
+            btn = (
+                page.ele('css:button[type="submit"]') or 
+                page.ele('xpath://button[contains(text(),"Sign in")]') or
+                page.ele('xpath://button[contains(text(),"登录")]')
+            )
             if btn:
                 btn.click()
             else:
@@ -251,6 +311,9 @@ class HidenCloudRenewer:
             return True
 
         log(f"❌ [{self.email}] 登录失败，当前 URL: {page.url}")
+        pic_path = f"err_login_{self.safe_email}.png"
+        page.get_screenshot(path=pic_path)
+        send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, f"❌ <b>{self.email}</b> 登录失败\nURL: {page.url}")
         return False
 
     def get_services(self) -> list[dict]:
@@ -282,7 +345,6 @@ class HidenCloudRenewer:
         page.get(manage_url)
         time.sleep(3)
 
-        # 提取 Token
         token = ''
         token_ele = page.ele('css:input[name="_token"]')
         if token_ele:
@@ -309,6 +371,12 @@ class HidenCloudRenewer:
                     result['success'] = True
                     result['message'] = '续期成功（UI）'
                     result['invoice_id'] = invoice_id
+                    
+                    # 📸 成功截图
+                    pic_path = f"success_{service_id}_{self.safe_email}.png"
+                    page.get_screenshot(path=pic_path)
+                    send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, 
+                                  f"✅ <b>{self.email}</b>\n服务 #{service_id} 续期成功！\n发票ID: <code>{invoice_id}</code>")
                     return result
         except Exception:
             pass
@@ -335,10 +403,24 @@ class HidenCloudRenewer:
                 result['success'] = True
                 result['message'] = '续期成功（POST）'
                 result['invoice_id'] = invoice_id
+                
+                # 刷新并截取成功的状态页
+                page.get(manage_url)
+                time.sleep(2)
+                pic_path = f"success_post_{service_id}_{self.safe_email}.png"
+                page.get_screenshot(path=pic_path)
+                send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, 
+                              f"✅ <b>{self.email}</b>\n服务 #{service_id} 续期成功（POST保底）！\n发票ID: <code>{invoice_id}</code>")
             else:
                 result['message'] = f'POST 状态码异常: {resp.status_code}'
         except Exception as e:
             result['message'] = f'POST 异常: {e}'
+
+        if not result['success']:
+            pic_path = f"fail_renew_{service_id}_{self.safe_email}.png"
+            page.get_screenshot(path=pic_path)
+            send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, 
+                          f"❌ <b>{self.email}</b>\n服务 #{service_id} 续期失败！\n原因: {result['message']}")
 
         return result
 
@@ -381,7 +463,7 @@ def main():
 
     for email, password in accounts:
         log(f"\n🚀 开始处理: {email}")
-        renewer = HidenCloudRenewer(email, password, proxy)
+        renewer = HidenCloudRenewer(email, password, proxy, tg_token, tg_chat_id)
         results = renewer.run()
         all_results.extend(results)
 
@@ -392,9 +474,8 @@ def main():
             lines.append(f"  {icon} 服务 #{r['service_id']}: {r['message']}{inv}")
         account_summaries.append('\n'.join(lines))
 
-    # 发送通知
     total_ok = sum(1 for r in all_results if r.get('success'))
-    tg_msg = f"🔔 <b>HidenCloud 续期报告</b>\n📊 成功 {total_ok} / 失败 {len(all_results)-total_ok}\n\n" + '\n\n'.join(account_summaries)
+    tg_msg = f"🔔 <b>HidenCloud 续期总报告</b>\n📊 成功 {total_ok} / 失败 {len(all_results)-total_ok}\n\n" + '\n\n'.join(account_summaries)
     send_tg(tg_token, tg_chat_id, tg_msg)
 
 
