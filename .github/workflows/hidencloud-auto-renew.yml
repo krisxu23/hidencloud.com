@@ -1,165 +1,108 @@
-name: HidenCloud Auto Renew
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 2 * * 1'  # 初始值，运行后会自动更新
-
-jobs:
-  renew:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_TOKEN }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            google-chrome-stable \
-            unzip \
-            xvfb \
-            libnss3 \
-            libatk-bridge2.0-0 \
-            libdrm2 \
-            libxkbcommon0 \
-            libgbm1 \
-            libasound2t64 \
-            libatspi2.0-0 \
-            libxshmfence1 \
-            fonts-liberation
-
-      - name: Install Python Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install DrissionPage requests pysocks
-
-      # ── 💡 关键核心：引入滚动浏览器缓存机制 ──────────────────────
-      - name: Restore Browser Profile Cache
-        uses: actions/cache@v4
-        with:
-          path: hiden_browser_profile
-          # 每次运行的 run_id 都不同，确保每次运行结束都会强制保存一个新的缓存快照
-          key: hiden-profile-${{ github.run_id }}
-          # 恢复时，自动寻找最新创建的、以 hiden-profile- 开头的缓存快照
-          restore-keys: |
-            hiden-profile-
-
-      - name: Setup Xray Proxy
-        run: |
-          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip -o xray.zip
-          chmod +x xray
-
-          cat << 'XEOF' > config.json
-          ${{ secrets.XRAY_CONFIG_JSON }}
-          XEOF
-
-          if [ ! -s config.json ]; then
-            echo "❌ Error: XRAY_CONFIG_JSON is empty!"
-            exit 1
-          fi
-
-          ./xray -c config.json > xray_log.txt 2>&1 &
-          sleep 12
-
-          if ps aux | grep -v grep | grep -q "./xray"; then
-            echo "✅ Xray 进程运行中"
-          else
-            echo "❌ Xray 启动失败"
-            cat xray_log.txt
-            exit 1
-          fi
-
-      - name: Run Renewal Script
-        env:
-          ACCOUNTS:     ${{ secrets.ACCOUNTS }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
-          PROXY:        "127.0.0.1:10808"
-        run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python main.py
-
-      # ── 运行完毕后，生成下次的随机 cron 并写回 yml ──────────────────────
-      - name: Schedule next random run
+- name: Schedule next random run
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           python3 - <<'PYEOF'
-          import random, re, subprocess, os
+          import random, re, json, os
+          from datetime import datetime, timezone
 
-          # 随机选 2 个不相邻的星期（间隔 ≥ 2 天，且不跨周首尾相接）
-          def pick_two_days():
+          STATE_FILE = ".github/workflows/renew_schedule.json"
+          YML_PATH   = ".github/workflows/hidencloud-auto-renew.yml"
+          day_names  = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
+
+          def pick_three_days():
               while True:
-                  days = sorted(random.sample(range(7), 2))
-                  d0, d1 = days
-                  # 正向间隔 ≥ 2，且不出现 0和6 相邻的情况
-                  if (d1 - d0) >= 2 and not (d0 == 0 and d1 == 6):
-                      return d0, d1
+                  days = sorted(random.sample(range(7), 3))
+                  if (days[1] - days[0]) >= 2 and (days[2] - days[1]) >= 2:
+                      return days
 
-          d0, d1 = pick_two_days()
+          def make_cron(m, h, d):
+              return f"{m} {h} * * {(d+1)%7}"
 
-          # 随机小时：北京时间 8~22 点之间（UTC 0~14）
-          h0 = random.randint(0, 14)
-          h1 = random.randint(0, 14)
-          m0 = random.randint(0, 59)
-          m1 = random.randint(0, 59)
+          def gen_schedule():
+              days = pick_three_days()
+              slots = []
+              for d in days:
+                  h = random.randint(0, 14)
+                  m = random.randint(0, 59)
+                  slots.append({"day": d, "h": h, "m": m, "done": False})
+              return slots
 
-          # GitHub Actions cron: 星期用 0=Sun,1=Mon,...,6=Sat
-          # Python weekday(): 0=Mon,...,6=Sun → 转换：(d+1)%7
-          cron0 = f"{m0} {h0} * * {(d0+1)%7}"
-          cron1 = f"{m1} {h1} * * {(d1+1)%7}"
+          def update_yml(slots):
+              with open(YML_PATH, "r") as f:
+                  content = f.read()
+              lines = []
+              for s in slots:
+                  cron = make_cron(s["m"], s["h"], s["day"])
+                  bj_h = (s["h"] + 8) % 24
+                  lines.append(f"    - cron: '{cron}'  # {day_names[s['day']]} 北京时间 {bj_h:02d}:{s['m']:02d}")
+              new_block = "  schedule:\n" + "\n".join(lines)
+              content = re.sub(
+                  r"  schedule:\n(?:    - cron: '[^']*'[^\n]*\n?)+",
+                  new_block + "\n",
+                  content,
+                  count=1
+              )
+              with open(YML_PATH, "w") as f:
+                  f.write(content)
+              print("✅ yml 已更新")
 
-          day_names = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
-          print(f"下次执行: {day_names[d0]} UTC {h0:02d}:{m0:02d}  |  {day_names[d1]} UTC {h1:02d}:{m1:02d}")
-          print(f"  cron0: {cron0}")
-          print(f"  cron1: {cron1}")
+          # ── 读取当前状态 ──
+          if os.path.exists(STATE_FILE):
+              with open(STATE_FILE, "r") as f:
+                  state = json.load(f)
+              slots = state["slots"]
+          else:
+              slots = None
 
-          # 读取并替换 yml 中的 cron 行
-          yml_path = ".github/workflows/hidencloud-auto-renew.yml"
-          with open(yml_path, "r") as f:
-              content = f.read()
+          # ── 判断逻辑 ──
+          now_utc  = datetime.now(timezone.utc)
+          now_day  = (now_utc.weekday())   # 0=Mon
+          now_h    = now_utc.hour
+          now_m    = now_utc.minute
 
-          # 替换所有 cron 行（保留缩进和注释前缀）
-          new_block = (
-              f"    - cron: '{cron0}'  # {day_names[d0]} 北京时间 {(h0+8)%24:02d}:{m0:02d}\n"
-              f"    - cron: '{cron1}'  # {day_names[d1]} 北京时间 {(h1+8)%24:02d}:{m1:02d}"
-          )
-          content = re.sub(
-              r"( *- cron: '[^']*'[^\n]*\n)+ *- cron: '[^']*'[^\n]*",
-              new_block,
-              content,
-              count=1
-          )
+          if slots is None:
+              # 首次运行，生成新的3个时间
+              print("📅 首次运行，生成新排期")
+              slots = gen_schedule()
+              update_yml(slots)
+          else:
+              all_done = all(s["done"] for s in slots)
 
-          with open(yml_path, "w") as f:
-              f.write(content)
+              if all_done:
+                  # 3个都执行完了，重新随机
+                  print("🔄 本轮3次全部完成，生成新排期")
+                  slots = gen_schedule()
+                  update_yml(slots)
+              else:
+                  # 标记当前这次为 done（匹配最近的未完成 slot）
+                  for s in slots:
+                      if not s["done"] and s["day"] == now_day:
+                          s["done"] = True
+                          print(f"✅ 标记 {day_names[s['day']]} {s['h']:02d}:{s['m']:02d} 已执行")
+                          break
+                  else:
+                      # 没匹配到就标记第一个未完成的
+                      for s in slots:
+                          if not s["done"]:
+                              s["done"] = True
+                              print(f"✅ 标记 {day_names[s['day']]} {s['h']:02d}:{s['m']:02d} 已执行（按序）")
+                              break
 
-          print("✅ yml 已更新")
+                  remaining = [s for s in slots if not s["done"]]
+                  print(f"📌 剩余未执行: {len(remaining)} 次")
+                  for s in remaining:
+                      print(f"   {day_names[s['day']]} UTC {s['h']:02d}:{s['m']:02d}")
+
+          # ── 保存状态 ──
+          with open(STATE_FILE, "w") as f:
+              json.dump({"slots": slots, "updated": now_utc.isoformat()}, f, indent=2)
+          print("✅ 状态已保存")
           PYEOF
 
-          # git commit & push
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/hidencloud-auto-renew.yml
-          git diff --cached --quiet || git commit -m "chore: update next renew schedule [skip ci]"
+          git add .github/workflows/hidencloud-auto-renew.yml .github/workflows/renew_schedule.json
+          git diff --cached --quiet || git commit -m "chore: update renew schedule [skip ci]"
           git push
-
-      - name: Upload Debug Artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-logs-and-screenshots
-          path: |
-            *.png
-            xray_log.txt
-          retention-days: 3
