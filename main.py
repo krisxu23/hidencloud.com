@@ -240,23 +240,22 @@ class HidenCloudRenewer:
             return True
 
         # ═════════════════════════════════════════════
-        #  🎯【精细修复】：重构表单账号密码填写机制
+        #  🎯【针对性修复】：根据 F12 结构精确定位输入框
         # ═════════════════════════════════════════════
         try:
-            # 采用 CSS 组合选择器，通杀 username / email / text 类型输入框，且利用 :not 彻底排除隐藏的 token 域
+            # 1. 寻找账号输入框：优先使用截图中的 id="email"，并用中文 placeholder 做保底
             email_ele = page.ele(
-                'css:input[name="username"]:not([type="hidden"]), '
-                'input[name="email"]:not([type="hidden"]), '
-                'input[type="email"], '
-                'input[placeholder*="Email" i], '
-                'input[placeholder*="Username" i]', 
+                'css:input#email, '
+                'input[id="email"], '
+                'input[placeholder*="邮箱"], '
+                'input[placeholder*="邮"]', 
                 timeout=12
             )
             if not email_ele:
                 raise Exception("无法定位到账号/用户名输入框")
                 
             email_ele.click()
-            # 采用全选清空，防止底层 .clear() 触发失败
+            # 组合物理键全选清空
             page.actions.key_down('control').send_key('a').key_up('control').send_key('backspace')
             time.sleep(0.3)
             
@@ -266,8 +265,13 @@ class HidenCloudRenewer:
                 time.sleep(random.uniform(0.02, 0.06))
             log("✍️ 用户名/邮箱字段已顺利填入")
             
-            # 寻找密码框
-            pwd_ele = page.ele('css:input[type="password"], input[name="password"]', timeout=6)
+            # 2. 寻找密码输入框：优先使用截图中的 id="password"
+            pwd_ele = page.ele(
+                'css:input#password, '
+                'input[id="password"], '
+                'input[type="password"]', 
+                timeout=6
+            )
             if not pwd_ele:
                 raise Exception("无法定位到密码输入框")
                 
@@ -299,7 +303,7 @@ class HidenCloudRenewer:
         try:
             btn = (
                 page.ele('css:button[type="submit"]') or 
-                page.ele('xpath://button[contains(text(),"Sign in")]') or
+                page.ele('text:登录') or
                 page.ele('xpath://button[contains(text(),"登录")]') or
                 page.ele('css:.btn-primary')
             )
@@ -358,7 +362,6 @@ class HidenCloudRenewer:
 
         ui_success = False
         try:
-            # 模糊文本 + 全标签扫描外部 "Renew" 按钮
             renew_btn = (
                 page.ele('text:Renew', timeout=5) or 
                 page.ele('xpath://*[contains(text(),"Renew")]') or
@@ -372,7 +375,6 @@ class HidenCloudRenewer:
             log("🖱️ 已成功点击外部 'Renew' 按钮，等待模态框弹出...")
             time.sleep(3)
 
-            # 定位弹窗中的橙色 "Create Invoice" 确认开票按钮
             invoice_btn = (
                 page.ele('text:Create Invoice', timeout=5) or
                 page.ele('xpath://*[contains(text(),"Create Invoice")]') or
@@ -386,7 +388,6 @@ class HidenCloudRenewer:
             log("🖱️ 已成功点击模态框中的 'Create Invoice' 按钮，正在开票...")
             time.sleep(5)
 
-            # 校验最终结果
             if 'invoice' in page.url or page.ele('text:Invoice') or page.ele('text:success'):
                 m = re.search(r'/invoice/([a-f0-9\-]+)', page.url)
                 invoice_id = m.group(1)[:8] if m else 'SUCCESS'
