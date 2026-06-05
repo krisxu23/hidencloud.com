@@ -54,12 +54,11 @@ def send_tg_photo(token: str, chat_id: str, photo_path: str, caption: str = ""):
             resp = requests.post(url, data=data, files=files, timeout=25)
         if resp.status_code == 200:
             log(f"📤 Telegram 截图已成功发送: {os.path.basename(photo_path)}")
-            # 发送成功后删除本地临时文件
-            os.remove(photo_path)
+            os.remove(photo_path)  # 发送成功后删除本地临时文件
         else:
             log(f"⚠️ Telegram 图片发送失败: {resp.text[:100]}")
     except Exception as e:
-        log(f"❌ Telegram 图片发送异常: {e}")
+        log(f"❌ Telegram 图片异常: {e}")
 
 
 def parse_accounts(raw: str) -> list[tuple[str, str]]:
@@ -82,7 +81,7 @@ def parse_accounts(raw: str) -> list[tuple[str, str]]:
 
 
 # ─────────────────────────────────────────────
-#  Turnstile 破解器
+#  Turnstile 破盾器
 # ─────────────────────────────────────────────
 
 class TurnstileSolver:
@@ -124,7 +123,7 @@ class TurnstileSolver:
         time.sleep(random.uniform(1.5, 2.5))
 
         click_success = False
-        # 3. 穿透 Closed Shadow Root 并使用物理轨迹点击
+        # 3. 穿透 Shadow Root 执行带偏移量物理点击
         try:
             body = iframe.ele('tag:body')
             sr = body.shadow_root if body else None
@@ -171,7 +170,7 @@ class TurnstileSolver:
 
 
 # ─────────────────────────────────────────────
-#  HidenCloud 续期核心
+#  HidenCloud 专属续期核心
 # ─────────────────────────────────────────────
 
 class HidenCloudRenewer:
@@ -205,8 +204,7 @@ class HidenCloudRenewer:
         co.set_argument('--no-default-browser-check')
         co.set_argument('--window-size=1280,1024')
         
-        # 真实浏览器有头模式（配合 xvfb 运行）
-        co.headless(False)
+        co.headless(False)  # 配合 xvfb 运行有头模式
         
         profile_path = os.path.join(os.getcwd(), 'hiden_browser_profile')
         co.set_user_data_path(profile_path)
@@ -228,42 +226,37 @@ class HidenCloudRenewer:
         page.get(self.LOGIN_URL)
         time.sleep(2)
         
-        # 🔥【新增优化 1】：检查是否因持久化缓存，开局就已经是自动登录状态
+        # 缓存检查 1：开局是否直接进入后台
         if 'dashboard' in page.url or 'service' in page.url:
-            log(f"✨ [{self.email}] 浏览器本地缓存生效，检测到已处于登录后台，跳过表单填写！")
+            log(f"✨ [{self.email}] 浏览器本地缓存有效，已处于登录后台！")
             return True
 
-        # 前置防护检查
         solver.solve(timeout=8) 
         time.sleep(random.uniform(2, 4))
 
-        # 🔥【新增优化 2】：过盾后再次检查是否因为 Cookie 自动跳转进了后台
+        # 缓存检查 2：过盾后是否自动跳转
         if 'dashboard' in page.url or 'service' in page.url:
-            log(f"✨ [{self.email}] 过盾后自动跳转至控制台后台，判定登录成功！")
+            log(f"✨ [{self.email}] 过盾后自动进入控制台后台！")
             return True
 
         try:
-            # 增强版多重选择器，提升容错率
             email_ele = (
                 page.ele('css:input[type="email"]', timeout=10) or 
                 page.ele('css:input[name*="email"]') or
-                page.ele('css:input[name*="username"]') or
-                page.ele('css:input[placeholder*="邮箱"]') or
                 page.ele('css:input[placeholder*="Email"]')
             )
             if not email_ele:
-                raise Exception("无法在当前页面定位到账号输入框")
+                raise Exception("无法定位账号输入框")
                 
             email_ele.click()
             email_ele.clear()
             for char in self.email:
                 email_ele.input(char, clear=False)
-                time.sleep(random.uniform(0.05, 0.12))
+                time.sleep(random.uniform(0.04, 0.10))
             
             pwd_ele = (
                 page.ele('css:input[type="password"]') or
                 page.ele('css:input[name*="password"]') or
-                page.ele('css:input[placeholder*="密码"]') or
                 page.ele('css:input[placeholder*="Password"]')
             )
             if pwd_ele:
@@ -271,25 +264,21 @@ class HidenCloudRenewer:
                 pwd_ele.clear()
                 for char in self.password:
                     pwd_ele.input(char, clear=False)
-                    time.sleep(random.uniform(0.05, 0.12))
+                    time.sleep(random.uniform(0.04, 0.10))
             
         except Exception as e:
             log(f"❌ 填写表单失败: {e}，当前页 URL: {page.url}")
-            # 📸 失败截屏并发送
             pic_path = f"err_form_{self.safe_email}.png"
             page.get_screenshot(path=pic_path)
-            send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, f"❌ <b>{self.email}</b> 填写表单失败: {e}\n当前页面URL: {page.url}")
+            send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, f"❌ <b>{self.email}</b> 填写表单失败: {e}\nURL: {page.url}")
             return False
 
-        # 破译登录表单级别的 Turnstile
         solver.solve()
 
-        # 提交前最后确认一次状态
         if 'dashboard' in page.url or 'service' in page.url:
             log(f"✅ [{self.email}] 登录成功")
             return True
 
-        # 点击提交按钮
         try:
             btn = (
                 page.ele('css:button[type="submit"]') or 
@@ -298,8 +287,6 @@ class HidenCloudRenewer:
             )
             if btn:
                 btn.click()
-            else:
-                return False
         except Exception as e:
             log(f"❌ 点击登录按钮失败: {e}")
             return False
@@ -340,102 +327,143 @@ class HidenCloudRenewer:
         page = self.page
         result = {'service_id': service_id, 'success': False, 'message': '', 'invoice_id': ''}
 
-        log(f"🔄 续期服务 #{service_id}...")
+        log(f"🔄 正在处理服务 #{service_id}...")
         manage_url = f"{self.BASE}/service/{service_id}/manage"
         page.get(manage_url)
-        time.sleep(3)
+        time.sleep(4)
 
+        # 提前获取页面上的 _token，防备 API 兜底使用
         token = ''
         token_ele = page.ele('css:input[name="_token"]')
         if token_ele:
             token = token_ele.value
 
-        # 点击 Renew 弹出模态框
+        # ═════════════════════════════════════════════
+        #  🔥【全新升级】：1:1 专属 UI 弹窗连续点击流
+        # ═════════════════════════════════════════════
+        ui_success = False
         try:
-            renew_btn = page.ele('xpath://button[contains(text(),"Renew")]') or page.ele('css:[data-action*="renew"]')
-            if renew_btn:
-                renew_btn.click()
-                time.sleep(2)
-        except Exception:
-            pass
+            # 1. 精准寻找页面上的绿色 "Renew" 按钮
+            renew_btn = (
+                page.ele('text=Renew', timeout=5) or 
+                page.ele('xpath://button[contains(text(),"Renew")]') or
+                page.ele('css:button.btn-success')
+            )
+            if not renew_btn:
+                raise Exception("无法定位页面的 'Renew' 按钮")
+            
+            renew_btn.click()
+            log("🖱️ 已成功点击外部 'Renew' 按钮，等待模态框弹出...")
+            time.sleep(2.5)
 
-        # 点击 Create Invoice
-        try:
-            confirm_btn = page.ele('xpath://button[contains(text(),"Create Invoice")]')
-            if confirm_btn:
-                confirm_btn.click()
-                time.sleep(4)
-                if 'invoice' in page.url:
-                    m = re.search(r'/invoice/([a-f0-9\-]+)', page.url)
-                    invoice_id = m.group(1)[:8] if m else ''
-                    result['success'] = True
-                    result['message'] = '续期成功（UI）'
-                    result['invoice_id'] = invoice_id
-                    
-                    # 📸 成功截图
-                    pic_path = f"success_{service_id}_{self.safe_email}.png"
-                    page.get_screenshot(path=pic_path)
-                    send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, 
-                                  f"✅ <b>{self.email}</b>\n服务 #{service_id} 续期成功！\n发票ID: <code>{invoice_id}</code>")
-                    return result
-        except Exception:
-            pass
+            # 2. 定位弹窗中的橙色 "Create Invoice" 按钮
+            invoice_btn = (
+                page.ele('text=Create Invoice', timeout=5) or
+                page.ele('xpath://button[contains(text(),"Create Invoice")]') or
+                page.ele('css:button.btn-warning') or 
+                page.ele('css:button[type="submit"]')
+            )
+            if not invoice_btn:
+                raise Exception("无法定位模态框中的 'Create Invoice' 按钮")
 
-        # API 保底
-        log(f"📡 #{service_id} 启动 API POST 保底方案...")
-        try:
-            s = requests.Session()
-            for ck in page.cookies():
-                s.cookies.set(ck.get('name', ''), ck.get('value', ''), domain=ck.get('domain', ''))
+            invoice_btn.click()
+            log("🖱️ 已成功点击模态框中的 'Create Invoice' 按钮，正在开票...")
+            time.sleep(5)
 
-            headers = {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Origin': self.BASE,
-                'Referer': manage_url,
-                'User-Agent': page.user_agent
-            }
-            proxies = {'http': f'socks5://{self.proxy}', 'https': f'socks5://{self.proxy}'} if self.proxy else None
-            resp = s.post(f"{self.BASE}/service/{service_id}/renew", data={'_token': token, 'days': '7'}, headers=headers, proxies=proxies, timeout=20)
-
-            if 'invoice' in resp.url or resp.status_code in (200, 302):
-                m = re.search(r'/invoice/([a-f0-9\-]+)', resp.url)
-                invoice_id = m.group(1)[:8] if m else ''
-                result['success'] = True
-                result['message'] = '续期成功（POST）'
-                result['invoice_id'] = invoice_id
+            # 3. 校验最终结果（是否跳转到发票页，或页面出现成功提示）
+            if 'invoice' in page.url or page.ele('text=Invoice created successfully'):
+                m = re.search(r'/invoice/([a-f0-9\-]+)', page.url)
+                invoice_id = m.group(1)[:8] if m else 'SUCCESS'
                 
-                # 刷新并截取成功的状态页
-                page.get(manage_url)
-                time.sleep(2)
-                pic_path = f"success_post_{service_id}_{self.safe_email}.png"
+                result['success'] = True
+                result['message'] = '续期成功（UI全自动点击）'
+                result['invoice_id'] = invoice_id
+                ui_success = True
+                
+                log(f"🎉 [{self.email}] 服务 #{service_id} UI 续期成功！发票ID: {invoice_id}")
+                
+                # 📸 成功截图留档
+                pic_path = f"success_ui_{service_id}_{self.safe_email}.png"
                 page.get_screenshot(path=pic_path)
                 send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, 
-                              f"✅ <b>{self.email}</b>\n服务 #{service_id} 续期成功（POST保底）！\n发票ID: <code>{invoice_id}</code>")
-            else:
-                result['message'] = f'POST 状态码异常: {resp.status_code}'
-        except Exception as e:
-            result['message'] = f'POST 异常: {e}'
+                              f"✅ <b>{self.email}</b>\n服务 #{service_id} 续期成功（网页端自动点击）！\n发票ID: <code>{invoice_id}</code>")
+                return result
+
+        except Exception as ui_err:
+            log(f"⚠️ UI 点击流遇到阻碍: {ui_err}")
+
+        # ═════════════════════════════════════════════
+        #  📡【API POST 保底方案】
+        # ═════════════════════════════════════════════
+        if not ui_success:
+            log(f"📡 #{service_id} 启动底层 API POST 保底续期策略...")
+            try:
+                s = requests.Session()
+                # 转移浏览器内的最新 Cookies
+                for ck in page.cookies():
+                    s.cookies.set(ck.get('name', ''), ck.get('value', ''), domain=ck.get('domain', ''))
+
+                headers = {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Origin': self.BASE,
+                    'Referer': manage_url,
+                    'User-Agent': page.user_agent
+                }
+                
+                # 配置代理
+                proxies = None
+                if self.proxy:
+                    p_str = self.proxy if "://" in self.proxy else f"socks5://{self.proxy}"
+                    proxies = {'http': p_str, 'https': p_str}
+
+                # 发起真实数据包提交 (包含7天周期的参数)
+                post_data = {'_token': token, 'days': '7'}
+                resp = s.post(f"{self.BASE}/service/{service_id}/renew", data=post_data, headers=headers, proxies=proxies, timeout=20)
+
+                if 'invoice' in resp.url or resp.status_code in (200, 302):
+                    m = re.search(r'/invoice/([a-f0-9\-]+)', resp.url)
+                    invoice_id = m.group(1)[:8] if m else 'POST_OK'
+                    result['success'] = True
+                    result['message'] = '续期成功（POST保底）'
+                    result['invoice_id'] = invoice_id
+                    
+                    # 重新刷新页面以截取最新的成功面板
+                    page.get(manage_url)
+                    time.sleep(2)
+                    pic_path = f"success_post_{service_id}_{self.safe_email}.png"
+                    page.get_screenshot(path=pic_path)
+                    send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, 
+                                  f"✅ <b>{self.email}</b>\n服务 #{service_id} 续期成功（POST保底）！\n发票ID: <code>{invoice_id}</code>")
+                else:
+                    result['message'] = f'POST 反馈异常，状态码: {resp.status_code}'
+            except Exception as post_err:
+                err_msg = str(post_err)
+                if "Missing dependencies for SOCKS support" in err_msg:
+                    result['message'] = 'Python缺失pysocks依赖库，请运行 pip install pysocks'
+                else:
+                    result['message'] = f'POST 异常: {err_msg}'
 
         if not result['success']:
+            log(f"❌ #{service_id} 续期最终判定失败: {result['message']}")
             pic_path = f"fail_renew_{service_id}_{self.safe_email}.png"
             page.get_screenshot(path=pic_path)
             send_tg_photo(self.tg_token, self.tg_chat_id, pic_path, 
-                          f"❌ <b>{self.email}</b>\n服务 #{service_id} 续期失败！\n原因: {result['message']}")
+                          f"❌ <b>{self.email}</b>\n服务 #{service_id} 续期失败！\n关键原因: {result['message']}")
 
         return result
 
     def run(self):
         try:
             if not self.login():
-                return [{'service_id': 'N/A', 'success': False, 'message': '登录失败'}]
+                return [{'service_id': 'N/A', 'success': False, 'message': '登录未通过'}]
             services = self.get_services()
             if not services:
-                return [{'service_id': 'N/A', 'success': False, 'message': '未找到服务'}]
+                return [{'service_id': 'N/A', 'success': False, 'message': '未提取到可用服务'}]
             
             results = []
             for svc in services:
                 results.append(self.renew_service(svc['id']))
-                time.sleep(3)
+                time.sleep(4)
             return results
         finally:
             if self.page:
@@ -454,7 +482,7 @@ def main():
     proxy        = os.getenv('PROXY', '').strip()
 
     if not accounts_raw:
-        log("❌ ACCOUNTS 环境变量为空")
+        log("❌ 未检测到 ACCOUNTS 环境变量")
         sys.exit(1)
 
     accounts = parse_accounts(accounts_raw)
@@ -462,7 +490,7 @@ def main():
     account_summaries = []
 
     for email, password in accounts:
-        log(f"\n🚀 开始处理: {email}")
+        log(f"\n🚀 开始调配账号: {email}")
         renewer = HidenCloudRenewer(email, password, proxy, tg_token, tg_chat_id)
         results = renewer.run()
         all_results.extend(results)
@@ -475,7 +503,7 @@ def main():
         account_summaries.append('\n'.join(lines))
 
     total_ok = sum(1 for r in all_results if r.get('success'))
-    tg_msg = f"🔔 <b>HidenCloud 续期总报告</b>\n📊 成功 {total_ok} / 失败 {len(all_results)-total_ok}\n\n" + '\n\n'.join(account_summaries)
+    tg_msg = f"🔔 <b>HidenCloud 续期总核验报告</b>\n📊 成功 {total_ok} / 失败 {len(all_results)-total_ok}\n\n" + '\n\n'.join(account_summaries)
     send_tg(tg_token, tg_chat_id, tg_msg)
 
 
