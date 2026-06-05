@@ -61,33 +61,36 @@ def parse_accounts(raw: str) -> list[tuple[str, str]]:
 
 
 # ─────────────────────────────────────────────
-#  Turnstile 破解
+#  Turnstile 破解（已优化静默与目标机制）
 # ─────────────────────────────────────────────
 
 class TurnstileSolver:
     def __init__(self, page: ChromiumPage):
         self.page = page
 
-    def solve(self, timeout: int = 20) -> bool:
+    def solve(self, timeout: int = 25) -> bool:
         log("🛡️ 开始处理 Cloudflare Turnstile...")
 
-        # 先检查是否已自动通过
-        try:
-            resp = self.page.ele('css:[name="cf-turnstile-response"]', timeout=2)
-            if resp and resp.value:
-                log("⚡ Token 已存在，Turnstile 自动通过")
-                return True
-        except Exception:
-            pass
+        # 策略 1：先进行【静默等待】
+        # 很多时候 Turnstile 会自动通过，模拟真人视觉反应可以避开直接点击的Bot审查
+        for i in range(5):
+            try:
+                resp = self.page.ele('css:[name="cf-turnstile-response"]', timeout=1)
+                if resp and resp.value:
+                    log(f"⚡ Token 已存在，Turnstile 自动静默通过 (耗时 {i}s)")
+                    return True
+            except Exception:
+                pass
+            time.sleep(1)
 
-        # 定位 iframe
+        # 策略 2：定位 iframe
         iframe = None
         for selector in [
             'css:iframe[src^="https://challenges.cloudflare.com"]',
             'css:iframe[id^="cf-chl-widget-"]',
         ]:
             try:
-                iframe = self.page.get_frame(selector, timeout=8)
+                iframe = self.page.get_frame(selector, timeout=5)
                 if iframe:
                     break
             except Exception:
@@ -95,54 +98,55 @@ class TurnstileSolver:
 
         if not iframe:
             log("❌ 找不到 Turnstile iframe")
-            return False
+            # 临死前再校验一次是否其实已经放行
+            resp = self.page.ele('css:[name="cf-turnstile-response"]', timeout=1)
+            return True if (resp and resp.value) else False
 
-        log("✅ 锁定 iframe，穿透 Shadow Root...")
+        # 模拟人类看到验证码后的迟疑延迟
         time.sleep(random.uniform(1.5, 2.5))
 
         clicked = False
-
-        # 方案1：穿透 Shadow Root
+        # 策略 3：穿透 Shadow Root 点击正确的舞台盒子区域，比点 checkbox 更安全
         try:
             body = iframe.ele('tag:body')
             sr = body.shadow_root if body else None
             if sr:
                 target = (
+                    sr.ele('css:#challenge-stage') or
+                    sr.ele('css:.flex.items-center') or
                     sr.ele('css:input[type="checkbox"]') or
-                    sr.ele('css:div.main-wrapper') or
                     sr.ele('css:#content')
                 )
                 if target:
-                    target.click.at(offset_x=10, offset_y=10)
+                    target.click()
                     clicked = True
-                    log("🖱️ Shadow Root 内点击成功")
+                    log("🖱️ Shadow Root 内目标元素点击成功")
         except Exception as e:
             log(f"⚠️ Shadow Root 穿透失败: {e}")
 
-        # 方案2：坐标盲点
         if not clicked:
             try:
-                iframe.frame_ele.click.at(offset_x=25, offset_y=30)
+                iframe.frame_ele.click()
                 clicked = True
-                log("🏹 坐标盲点点击")
+                log("🏹 Iframe 框架直接点击")
             except Exception as e:
                 log(f"❌ 盲点失败: {e}")
 
         if not clicked:
             return False
 
-        # 等待 token 注入
+        # 4. 等待验证通过后的 Token 注入
         for i in range(timeout):
             time.sleep(1)
             try:
                 resp = self.page.ele('css:[name="cf-turnstile-response"]', timeout=1)
                 if resp and resp.value:
-                    log(f"🎉 Turnstile 通过！(耗时 {i+1}s)")
+                    log(f"🎉 Turnstile 终审通过！(总耗时 {i+1}s)")
                     return True
             except Exception:
                 pass
 
-        log("⚠️ Turnstile 等待超时")
+        log("⚠️ Turnstile 等待超时，可能触发了图形验证码或被判定为纯 Bot")
         return False
 
 
@@ -171,6 +175,11 @@ class HidenCloudRenewer:
         co.set_argument('--disable-gpu')
         co.set_argument('--disable-blink-features=AutomationControlled')
         co.set_argument('--window-size=1280,900')
+        
+        # 【核心优化】：指定本地目录保存浏览器缓存（积累环境指纹信用，降低风控概率）
+        profile_path = os.path.join(os.getcwd(), 'hiden_browser_profile')
+        co.set_user_data_path(profile_path)
+        
         co.set_user_agent(
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
             'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -190,16 +199,16 @@ class HidenCloudRenewer:
 
         page.get(self.LOGIN_URL)
         
-        # 1. 前置 Cloudflare 检查：如果遇到 5 秒盾全局拦截，先过盾
+        # 1. 前置 Cloudflare 检查：防止在显示表单前就被拦截
         log(f"🛡️ [{self.email}] 检查前置 Cloudflare 防护...")
         solver.solve(timeout=8) 
         
         # 等待页面渲染
         time.sleep(random.uniform(2, 4))
 
-        # 2. 填写表单（使用更鲁棒的定位方式）
+        # 2. 填写表单（使用高包容性的多重元素定位选择器）
         try:
-            # 账号框：支持 type=email，或名字包含 email/username，或利用文字标签定位
+            # 账号框
             email_ele = (
                 page.ele('css:input[type="email"]', timeout=10) or 
                 page.ele('css:input[name*="email"]') or 
@@ -227,7 +236,7 @@ class HidenCloudRenewer:
             
         except Exception as e:
             log(f"❌ [{self.email}] 填写表单失败: {e}")
-            # 截图留证
+            # 异常时截图以便排查
             debug_pic = f"error_login_{self.email.replace('@','_')}.png"
             try:
                 page.get_screenshot(path=debug_pic)
@@ -236,12 +245,12 @@ class HidenCloudRenewer:
                 pass
             return False
 
-        # 3. 破解表单层 Turnstile（如果之前的前置检查没用到）
+        # 3. 破译表单层 Turnstile
         ok = solver.solve()
         if not ok:
             log(f"⚠️ [{self.email}] Turnstile 未通过，尝试直接提交...")
 
-        # 4. 提交登录
+        # 4. 提交登录（完美匹配 "Sign in to your account" 按钮）
         try:
             btn = (
                 page.ele('xpath://button[contains(text(),"Sign in")]') or
@@ -408,7 +417,6 @@ class HidenCloudRenewer:
         # 保底：直接 POST API
         log(f"📡 [{self.email}] #{service_id} 使用直接 POST 续期...")
         try:
-            # 从 DrissionPage 拿 cookies 构造 requests session
             cookies_list = page.cookies()
             s = requests.Session()
             for ck in cookies_list:
@@ -438,7 +446,6 @@ class HidenCloudRenewer:
             if 'invoice' in resp.url or resp.status_code in (200, 302):
                 m = re.search(r'/invoice/([a-f0-9\-]+)', resp.url)
                 invoice_id = m.group(1)[:8] if m else ''
-                # 进一步验证：检查响应内容
                 if '发票' in resp.text or 'invoice' in resp.text.lower() or invoice_id:
                     result['success'] = True
                     result['message'] = '续期成功（POST）'
@@ -501,7 +508,7 @@ def main():
     accounts_raw = os.getenv('ACCOUNTS', '').strip()
     tg_token     = os.getenv('TG_BOT_TOKEN', '').strip()
     tg_chat_id   = os.getenv('TG_CHAT_ID', '').strip()
-    proxy        = os.getenv('PROXY', '').strip()   # 格式: 127.0.0.1:10808
+    proxy        = os.getenv('PROXY', '').strip()
 
     if not accounts_raw:
         log("❌ 环境变量 ACCOUNTS 为空，退出")
