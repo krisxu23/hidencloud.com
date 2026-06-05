@@ -42,6 +42,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install DrissionPage requests pysocks
 
+      # ── 💡 关键核心：引入滚动浏览器缓存机制 ──────────────────────
+      - name: Restore Browser Profile Cache
+        uses: actions/cache@v4
+        with:
+          path: hiden_browser_profile
+          # 每次运行的 run_id 都不同，确保每次运行结束都会强制保存一个新的缓存快照
+          key: hiden-profile-${{ github.run_id }}
+          # 恢复时，自动寻找最新创建的、以 hiden-profile- 开头的缓存快照
+          restore-keys: |
+            hiden-profile-
+
       - name: Setup Xray Proxy
         run: |
           curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
@@ -109,7 +120,7 @@ jobs:
           cron1 = f"{m1} {h1} * * {(d1+1)%7}"
 
           day_names = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
-          print(f"下次执行: {day_names[d0]} UTC {h0:02d}:{m0:02d}  |  {day_names[d1]} UTC {h1:02d}:{h1:02d}")
+          print(f"下次执行: {day_names[d0]} UTC {h0:02d}:{m0:02d}  |  {day_names[d1]} UTC {h1:02d}:{m1:02d}")
           print(f"  cron0: {cron0}")
           print(f"  cron1: {cron1}")
 
