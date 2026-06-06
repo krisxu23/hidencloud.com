@@ -369,18 +369,13 @@ jobs:
               print(f"❌ 未找到 YML 文件: {YML_PATH}")
           PYEOF
 
-          # 5. Git 提交并推送
+          # 5. Git 提交并推送（强制写入，不跳过）
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .github/workflows/hidencloud-auto-renew.yml
-          
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: update daily random schedule [skip ci]"
-            git push
-            echo "🚀 成功将明日随机时间推送到仓库"
-          else
-            echo "⏳ 时间巧合未改变，无需提交"
-          fi
+          git commit --allow-empty -m "chore: update daily random schedule [skip ci]"
+          git push
+          echo "🚀 成功将明日随机时间推送到仓库"
 
       - name: Save Cache
         if: always()
