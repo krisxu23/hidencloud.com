@@ -346,25 +346,33 @@ jobs:
           cron_h = target_utc.hour
 
           # 3. 生成新的 Cron 表达式 (每天运行格式: m h * * *)
-          cron_line = f"    - cron: '{cron_m} {cron_h} * * *'  # 每天随机 北京时间 {bj_h:02d}:{bj_m:02d}"
-          print(f"🎲 针对应生成的明日排期：{cron_line.strip()}")
+          cron_value = f"{cron_m} {cron_h} * * *"
+          cron_comment = f"  # 每天随机 北京时间 {bj_h:02d}:{bj_m:02d}"
+          print(f"🎲 针对应生成的明日排期：- cron: '{cron_value}'{cron_comment}")
 
-          # 4. 替换 YML 文件中的 schedule 部分
+          # 4. 替换 YML 文件中的 cron 行（直接逐行替换，不依赖缩进正则）
           if os.path.exists(YML_PATH):
               with open(YML_PATH, "r", encoding="utf-8") as f:
-                  content = f.read()
+                  lines = f.readlines()
 
-              new_block = "  schedule:\n" + cron_line
-              content = re.sub(
-                  r"  schedule:\n(?:    - cron: '[^']*'[^\n]*\n?)+",
-                  new_block + "\n",
-                  content,
-                  count=1
-              )
+              new_lines = []
+              replaced = False
+              for line in lines:
+                  if re.search(r"- cron:", line) and not replaced:
+                      # 保留原行的缩进前缀
+                      indent = re.match(r"(\s*)", line).group(1)
+                      new_lines.append(f"{indent}- cron: '{cron_value}'{cron_comment}\n")
+                      replaced = True
+                  else:
+                      new_lines.append(line)
 
               with open(YML_PATH, "w", encoding="utf-8") as f:
-                  f.write(content)
-              print("✅ YML 中的下一次 Cron 排期已成功改写")
+                  f.writelines(new_lines)
+
+              if replaced:
+                  print("✅ YML 中的下一次 Cron 排期已成功改写")
+              else:
+                  print("❌ 未找到 cron 行，替换失败")
           else:
               print(f"❌ 未找到 YML 文件: {YML_PATH}")
           PYEOF
