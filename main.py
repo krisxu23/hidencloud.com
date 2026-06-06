@@ -1,668 +1,896 @@
 import os
 import re
+import sys
 import time
+import random
 import requests
-from datetime import datetime, timezone, timedelta
-from seleniumbase import Driver
-
-# ====================== 配置区域 ======================
-HIDENCLOUD = os.getenv("HIDENCLOUD", "")
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
-PROXY_SERVER = os.getenv("PROXY_SERVER", "")
-
-if "-----" in HIDENCLOUD:
-    HIDEN_EMAIL, HIDEN_PWD = HIDENCLOUD.split("-----", 1)
-else:
-    raise ValueError("❌ HIDENCLOUD 格式错误，应为 email-----password")
-
-BASE_URL = "https://dash.hidencloud.com"
-STATE_DIR = "browser_state"
-SCREENSHOT_DIR = "screenshots"
-
-os.makedirs(STATE_DIR, exist_ok=True)
-os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-
-USER_DATA_DIR = os.path.abspath(os.path.join(STATE_DIR, "selenium_profile"))
+from datetime import datetime
+from DrissionPage import ChromiumPage, ChromiumOptions
 
 
-# ====================== 工具函数 ======================
-def get_bj_time():
-    return (datetime.now(timezone.utc) + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+# ─────────────────────────────────────────────
+#  工具函数
+# ─────────────────────────────────────────────
+
+def log(msg: str):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def send_tg_notification(message, photo_path=None):
-    """发送 TG 通知。有截图时发图片+说明，否则发纯文字。"""
-    if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("[WARN] 未配置 TG 信息，跳过发送")
+def send_tg(token: str, chat_id: str, text: str):
+    """发送 Telegram 纯文字通知"""
+    if not token or not chat_id:
         return
-    # Markdown caption 限制 1024 字符，文字消息限制 4096 字符
     try:
-        if photo_path and os.path.exists(photo_path):
-            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
-            caption = message[:1020] + "…" if len(message) > 1024 else message
-            with open(photo_path, 'rb') as f:
-                resp = requests.post(
-                    url,
-                    files={'photo': f},
-                    data={'chat_id': TG_CHAT_ID, 'caption': caption, 'parse_mode': 'Markdown'},
-                    timeout=30,
-                )
-            # 若图片发送失败（如文件损坏），降级为纯文字
-            if not resp.ok:
-                print(f"[WARN] 图片发送失败({resp.status_code})，降级为文字")
-                raise ValueError("photo failed")
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        resp = requests.post(url, json={
+            "chat_id": chat_id,
+            "text": text[:4000],
+            "parse_mode": "HTML"
+        }, timeout=15)
+        if resp.status_code == 200:
+            log("📤 Telegram 文字通知已发送")
         else:
-            raise ValueError("no photo")
-    except Exception:
-        try:
-            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-            text = message[:4000] + "…" if len(message) > 4096 else message
-            requests.post(
-                url,
-                json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "Markdown"},
-                timeout=15,
-            )
-        except Exception as e:
-            print(f"[ERROR] TG 发送失败: {e}")
-            return
-    print("[INFO] 📡 TG 通知已发送")
-
-
-def take_screenshot(driver, name):
-    timestamp = datetime.now().strftime('%H%M%S')
-    filename = f"{SCREENSHOT_DIR}/{timestamp}-{name}.png"
-    try:
-        driver.save_screenshot(filename)
-        print(f"[INFO] 📸 截图 → {filename}")
+            log(f"⚠️ Telegram 文字发送失败: {resp.text[:100]}")
     except Exception as e:
-        print(f"[WARN] 截图失败: {e}")
-    return filename
+        log(f"❌ Telegram 文字异常: {e}")
 
 
-def wait_for_turnstile_token(driver, timeout=90):
-    print("[INFO] ⏳ 等待 Turnstile 验证通过...")
-    start = time.time()
-    while time.time() - start < timeout:
-        token = driver.execute_script(
-            'return document.querySelector("[name=cf-turnstile-response]")?.value'
-        )
-        if token and len(token) > 20:
-            print("[INFO] ✅ Turnstile token 已生成")
-            return True
-        time.sleep(1)
-    return False
+def send_tg_photo(token: str, chat_id: str, photo_path: str, caption: str = ""):
+    """
+    发送 Telegram 图片通知。
+    发送成功后删除本地文件；图片发送失败自动降级为纯文字，不丢消息。
+    """
+    if not token or not chat_id:
+        return
+    caption = caption[:1020]   # Telegram caption 上限 1024
+    if os.path.exists(photo_path):
+        try:
+            url = f"https://api.telegram.org/bot{token}/sendPhoto"
+            with open(photo_path, 'rb') as f:
+                resp = requests.post(url, data={
+                    'chat_id': chat_id,
+                    'caption': caption,
+                    'parse_mode': 'HTML'
+                }, files={'photo': f}, timeout=25)
+            if resp.status_code == 200:
+                log(f"📤 Telegram 截图已发送: {os.path.basename(photo_path)}")
+                os.remove(photo_path)
+                return
+            else:
+                log(f"⚠️ 图片发送失败({resp.status_code})，降级为文字")
+        except Exception as e:
+            log(f"⚠️ 图片发送异常: {e}，降级为文字")
+    else:
+        log(f"⚠️ 截图文件不存在: {photo_path}，降级为文字")
+    # 降级
+    send_tg(token, chat_id, caption)
 
 
-def wait_for_url_contains(driver, keyword, timeout=45):
-    start = time.time()
-    while time.time() - start < timeout:
-        if keyword in driver.current_url:
-            return True
-        time.sleep(0.5)
-    return False
+def parse_accounts(raw: str) -> list[tuple[str, str]]:
+    """解析多账号，格式：email---password，支持换行或逗号分隔"""
+    accounts = []
+    lines = re.split(r'[\n,]+', raw.strip())
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if '---' in line:
+            parts = line.split('---', 1)
+            email, password = parts[0].strip(), parts[1].strip()
+            if email and password:
+                accounts.append((email, password))
+        else:
+            log(f"⚠️ 无法解析行: {line}")
+    return accounts
 
 
-def check_login_error(driver):
+def _screenshot(page: ChromiumPage, path: str) -> str:
+    """截图并返回路径，失败不抛异常"""
     try:
-        error_selectors = [
-            ".text-red-500", ".alert-danger", "[role='alert']", ".error", ".invalid-feedback"
-        ]
-        for sel in error_selectors:
+        page.get_screenshot(path=path)
+        log(f"📸 截图已保存: {path}")
+    except Exception as e:
+        log(f"⚠️ 截图失败: {e}")
+    return path
+
+
+# ─────────────────────────────────────────────
+#  Turnstile 破解器
+# ─────────────────────────────────────────────
+
+class TurnstileSolver:
+    def __init__(self, page: ChromiumPage):
+        self.page = page
+
+    # ── token 检测 ────────────────────────────
+    def _has_token(self) -> bool:
+        try:
+            el = self.page.ele('css:[name="cf-turnstile-response"]', timeout=1)
+            return bool(el and el.value)
+        except Exception:
+            return False
+
+    # ── 方式 A：Shadow Root 穿透点击 ──────────
+    def _click_shadow(self, iframe) -> bool:
+        try:
+            body = iframe.ele('tag:body')
+            sr = body.shadow_root if body else None
+            if not sr:
+                return False
+            target = (
+                sr.ele('css:input[type="checkbox"]') or
+                sr.ele('css:#challenge-stage') or
+                sr.ele('css:div.main-wrapper') or
+                sr.ele('css:#content')
+            )
+            if target:
+                log("🖱️ [Shadow Root] 找到目标，执行物理偏移点击...")
+                target.click.at(offset_x=random.randint(8, 15),
+                                offset_y=random.randint(8, 15))
+                return True
+        except Exception as e:
+            log(f"⚠️ Shadow Root 穿透失败: {e}")
+        return False
+
+    # ── 方式 B：Actions 物理坐标点击 ──────────
+    def _click_physical(self, iframe) -> bool:
+        """
+        获取 iframe 在页面中的真实像素坐标，
+        用 Actions 链将鼠标移到复选框中心并物理点击。
+        这一方式能绕过部分检测 JS 注入点击的反爬机制。
+        """
+        try:
+            frame_ele = iframe.frame_ele
+            rect = self.page.run_js(
+                """
+                var r = arguments[0].getBoundingClientRect();
+                return {x: r.left, y: r.top, w: r.width, h: r.height};
+                """,
+                frame_ele
+            )
+            if not rect:
+                return False
+
+            # Turnstile 复选框通常在 iframe 左侧约 25px、垂直居中
+            target_x = int(rect['x']) + random.randint(20, 30)
+            target_y = int(rect['y']) + int(rect['h'] / 2) + random.randint(-3, 3)
+            log(f"🖱️ [物理坐标] Actions 移动到 ({target_x}, {target_y}) 并点击...")
+
+            actions = self.page.actions
+            # 先移到附近随机位置，再移到目标（模拟人工轨迹）
+            actions.move(target_x + random.randint(-30, 30),
+                         target_y + random.randint(-20, 20))
+            time.sleep(random.uniform(0.3, 0.7))
+            actions.move(target_x, target_y)
+            time.sleep(random.uniform(0.15, 0.35))
+            actions.click()
+            return True
+        except Exception as e:
+            log(f"⚠️ Actions 物理坐标点击失败: {e}")
+        return False
+
+    # ── 方式 C：iframe 元素坐标盲点 ──────────
+    def _click_blind(self, iframe) -> bool:
+        try:
+            log("🏹 [盲点] 执行 iframe 元素偏移点击...")
+            iframe.frame_ele.click.at(
+                offset_x=random.randint(20, 30),
+                offset_y=random.randint(25, 35)
+            )
+            return True
+        except Exception as e:
+            log(f"⚠️ 盲点点击失败: {e}")
+        return False
+
+    # ── 主入口 ────────────────────────────────
+    def solve(self, timeout: int = 25) -> bool:
+        log("🛡️ 开始处理 Cloudflare Turnstile...")
+
+        # 1. 检查是否已自动通过
+        for i in range(4):
+            if self._has_token():
+                log(f"⚡ [自动通过] Token 已存在 (等待 {i}s)")
+                return True
+            time.sleep(1)
+
+        # 2. 锁定 iframe
+        iframe = None
+        for selector in [
+            'css:iframe[src^="https://challenges.cloudflare.com"]',
+            'css:iframe[id^="cf-chl-widget-"]',
+        ]:
             try:
-                elem = driver.find_element(sel, by="css selector")
-                if elem and elem.is_displayed() and elem.text.strip():
-                    return elem.text.strip()
-            except:
+                iframe = self.page.get_frame(selector, timeout=5)
+                if iframe:
+                    break
+            except Exception:
                 pass
-    except:
-        pass
-    return None
+
+        if not iframe:
+            log("❌ 找不到 Turnstile iframe")
+            return self._has_token()
+
+        time.sleep(random.uniform(1.2, 2.0))
+
+        # 3. 依次尝试三种点击方式，任一成功即进入等待
+        click_success = (
+            self._click_shadow(iframe) or
+            self._click_physical(iframe) or
+            self._click_blind(iframe)
+        )
+
+        if not click_success:
+            log("❌ 所有点击方式均失败")
+            return False
+
+        # 4. 等待 token 出现（如未通过则每隔 8s 用物理坐标重试一次）
+        log("⏳ 等待 Turnstile 验证通过...")
+        for i in range(timeout):
+            time.sleep(1)
+            if self._has_token():
+                log(f"🎉 过盾成功！(总耗时 {i+1}s)")
+                return True
+            # 每 8s 追加一次物理点击补救
+            if i > 0 and i % 8 == 0:
+                log(f"🔁 第 {i}s 仍未通过，追加物理坐标点击...")
+                self._click_physical(iframe) or self._click_blind(iframe)
+
+        log("⚠️ Turnstile 等待超时")
+        return False
 
 
-def mask_email(email):
-    if '@' in email:
-        local, domain = email.split('@', 1)
-        return f"{local[:3]}***@{domain}"
-    return f"{email[:3]}***"
-
-
-def parse_due_date(text):
-    """将页面显示的日期字符串转换为 YYYY-MM-DD 格式"""
+def _parse_due_date(text: str) -> str | None:
+    """从页面文字提取标准化日期 YYYY-MM-DD，失败返回 None"""
     if not text:
         return None
-    match = re.search(r'(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})', text)
-    if match:
-        day, month_str, year = match.groups()
+    # "12 Jun 2026" 格式
+    m = re.search(r'(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})', text)
+    if m:
         try:
-            dt = datetime.strptime(f"{day} {month_str} {year}", "%d %b %Y")
+            dt = datetime.strptime(f"{m.group(1)} {m.group(2)} {m.group(3)}", "%d %b %Y")
             return dt.strftime("%Y-%m-%d")
-        except:
+        except Exception:
             pass
+    # "2026-06-12" 格式
     if re.match(r'\d{4}-\d{2}-\d{2}', text):
-        return text
+        return text[:10]
     return None
 
 
-def get_current_due_date(driver):
-    """获取当前管理页面的到期时间，兼容多种页面结构"""
+def _get_due_date(page: ChromiumPage) -> tuple[str, str | None]:
+    """
+    读取管理页面的到期日期。
+    返回 (raw_text, std_date)，读取失败返回 ("N/A", None)。
+    """
     selectors = [
-        ("xpath", "//h6[contains(text(),'Due date')]/following-sibling::div"),
-        ("xpath", "//p[contains(text(),'Due date')]/following-sibling::*"),
-        ("xpath", "//*[contains(text(),'Due date')]/..//*[contains(@class,'text')]"),
-        ("xpath", "//span[contains(text(),'Next Invoice')]/../..//span[last()]"),
-        ("css selector", ".next-invoice-date"),
+        # 别人脚本中使用的选择器
+        ('xpath', "//h6[contains(text(),'Due date')]/following-sibling::div"),
+        ('xpath', "//p[contains(text(),'Due date')]/following-sibling::*"),
+        # Next Invoice 区域
+        ('xpath', "//span[contains(text(),'Next Invoice')]/../..//span[last()]"),
+        ('xpath', "//*[contains(text(),'Next Invoice')]/../following-sibling::*//*[contains(@class,'text')]"),
+        ('css',   ".next-invoice-date"),
     ]
     for by, sel in selectors:
         try:
-            elem = driver.find_element(by, sel)
-            raw = elem.text.strip()
-            if raw:
-                std = parse_due_date(raw)
-                return raw, std
-        except:
-            continue
+            if by == 'xpath':
+                el = page.ele(f'xpath:{sel}', timeout=3)
+            else:
+                el = page.ele(f'css:{sel}', timeout=3)
+            if el:
+                raw = el.text.strip()
+                if raw and raw != 'N/A':
+                    return raw, _parse_due_date(raw)
+        except Exception:
+            pass
     return "N/A", None
 
 
-def get_all_service_ids(driver):
-    """从 dashboard 页面提取所有服务 ID"""
-    sids = []
-    try:
-        # 优先从 manage 链接抓取
-        links = driver.find_elements("css selector", "a[href*='/service/'][href*='/manage']")
-        for link in links:
-            href = link.get_attribute("href") or ""
-            m = re.search(r'/service/(\d+)/manage', href)
-            if m and m.group(1) not in sids:
-                sids.append(m.group(1))
-    except:
-        pass
+# ─────────────────────────────────────────────
+#  HidenCloud 续期核心
+# ─────────────────────────────────────────────
 
-    if not sids:
-        # 从文字 "Free Server #XXXX" 提取
-        try:
-            elems = driver.find_elements("xpath", "//*[contains(text(),'Free Server #')]")
-            for elem in elems:
-                m = re.search(r'Free Server #(\d+)', elem.text)
-                if m and m.group(1) not in sids:
-                    sids.append(m.group(1))
-        except:
-            pass
+class HidenCloudRenewer:
+    BASE = "https://dash.hidencloud.com"
+    LOGIN_URL = f"{BASE}/auth/login"
+    DASHBOARD_URL = f"{BASE}/dashboard"
 
-    return sids
+    def __init__(self, email: str, password: str, proxy: str = "",
+                 tg_token: str = "", tg_chat_id: str = ""):
+        self.email = email
+        self.password = password
+        self.proxy = proxy
+        self.tg_token = tg_token
+        self.tg_chat_id = tg_chat_id
+        self.page: ChromiumPage | None = None
+        self.safe_email = email.replace('@', '_').replace('.', '_')
 
+    # ── 浏览器初始化 ──────────────────────────────
+    def _make_page(self) -> ChromiumPage:
+        co = ChromiumOptions()
+        if os.path.exists('/usr/bin/google-chrome'):
+            co.set_browser_path('/usr/bin/google-chrome')
 
-def close_any_modal(driver):
-    """尝试关闭所有可见弹窗（点击 OK / Cancel / ×）"""
-    for sel in [
-        "//button[contains(text(),'OK')]",
-        "//button[contains(text(),'Cancel')]",
-        "//button[@aria-label='Close']",
-        "//button[contains(@class,'close')]",
-    ]:
-        try:
-            btn = driver.find_element("xpath", sel)
-            if btn.is_displayed():
-                btn.click()
-                time.sleep(0.5)
-                return True
-        except:
-            pass
-    return False
+        for arg in [
+            '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+            '--disable-setuid-sandbox', '--disable-software-rasterizer',
+            '--disable-extensions', '--disable-popup-blocking',
+            '--ignore-certificate-errors', '--no-first-run',
+            '--no-default-browser-check', '--window-size=1280,1024',
+        ]:
+            co.set_argument(arg)
 
+        co.headless(False)  # 配合 xvfb 运行
+        profile_path = os.path.join(os.getcwd(), 'hiden_browser_profile')
+        co.set_user_data_path(profile_path)
+        co.auto_port()
 
-def wait_for_modal_visible(driver, timeout=10):
-    """等待续期模态框出现，返回模态框元素或 None"""
-    modal_selectors = [
-        "css selector", ".fixed.inset-0:not([style*='display: none'])",
-    ]
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            el = driver.find_element(*modal_selectors)
-            if el.is_displayed():
-                return el
-        except:
-            pass
-        time.sleep(0.5)
-    return None
+        if self.proxy:
+            proxy_url = self.proxy if "://" in self.proxy else f"socks5://{self.proxy}"
+            co.set_argument(f'--proxy-server={proxy_url}')
+            log(f"🌐 代理已配置: {proxy_url}")
 
+        return ChromiumPage(co)
 
-def detect_restricted_popup(driver):
-    """
-    检测是否弹出了 Renewal Restricted 弹窗。
-    返回 (is_restricted: bool, alert_text: str, days_left: int|None, threshold: int|None)
-    """
-    try:
-        h3_text = driver.execute_script(
-            "var el = document.querySelector('.fixed.inset-0 h3');"
-            "return el ? el.textContent.trim() : '';"
-        )
-        if 'Renewal Restricted' in h3_text:
-            alert_text = driver.execute_script(
-                "var el = document.querySelector('.fixed.inset-0 p');"
-                "return el ? el.textContent.trim() : '';"
-            )
-            # 从弹窗文字中提取天数，如 "expires in 6 days"
-            days_left = None
-            m = re.search(r'expires in (\d+) day', alert_text or "", re.IGNORECASE)
-            if m:
-                days_left = int(m.group(1))
-            return True, alert_text or "", days_left, None
-    except:
-        pass
-    return False, "", None, None
+    # ── 登录 ──────────────────────────────────────
+    def login(self) -> bool:
+        log(f"🔐 [{self.email}] 开始登录...")
+        self.page = self._make_page()
+        page = self.page
+        solver = TurnstileSolver(page)
 
-
-def notify_service_result(sid, res):
-    """续期完成后立即发一条带截图的 TG 通知（每个服务单独一条）。"""
-    if res["success"]:
-        icon = "✅ 续期成功"
-    elif res["skipped"]:
-        icon = "⏰ 未到窗口期"
-    else:
-        icon = "❌ 续期失败"
-
-    due_change = res["due_before"]
-    if res["due_after"] != "N/A" and res["due_after"] != res["due_before"]:
-        due_change = f"{res['due_before']} → {res['due_after']}"
-    elif res["due_after"] != "N/A":
-        due_change = res["due_after"]
-
-    extra = ""
-    if res["skipped"] and res.get("days_left") is not None:
-        thr = res.get("threshold")
-        extra = f"\n剩余: {res['days_left']} 天（需 ≤{thr} 天可续）" if thr else f"\n剩余: {res['days_left']} 天"
-
-    msg = (
-        f"{icon}\n\n"
-        f"账号: `{HIDEN_EMAIL}`\n"
-        f"服务: `Free Server #{sid}`\n"
-        f"到期: {due_change}{extra}\n"
-        f"详情: {res['message']}\n"
-        f"时间: {get_bj_time()}"
-    )
-    send_tg_notification(msg, photo_path=res.get("screenshot"))
-
-
-def renew_one_service(driver, sid):
-    """
-    对单个服务执行续期。
-    返回 dict:
-        success   bool
-        skipped   bool   (限制弹窗，未到窗口期)
-        message   str
-        days_left int|None
-        threshold int|None
-        due_before str
-        due_after  str
-        screenshot str
-    """
-    result = {
-        "success": False,
-        "skipped": False,
-        "message": "",
-        "days_left": None,
-        "threshold": None,
-        "due_before": "N/A",
-        "due_after": "N/A",
-        "screenshot": None,
-    }
-
-    manage_url = f"{BASE_URL}/service/{sid}/manage"
-    print(f"[INFO] 🚀 [{sid}] 访问管理页面...")
-    driver.get(manage_url)
-    time.sleep(3)
-    take_screenshot(driver, f"s{sid}-01-manage")
-
-    # 续期前到期时间
-    result["due_before"], _ = get_current_due_date(driver)
-    print(f"[INFO] [{sid}] 续期前到期: {result['due_before']}")
-
-    # ── 定位 Renew 按钮 ──
-    renew_btn = None
-    btn_selectors = [
-        ("css selector", "button[onclick*='showRenewAlert']"),
-        ("xpath", "//button[.//i[contains(@class,'bx-recycle')]]"),
-        ("xpath", "//button[normalize-space()='Renew']"),
-        ("xpath", "//button[contains(text(),'Renew')]"),
-    ]
-    for by, val in btn_selectors:
-        try:
-            el = driver.find_element(by, val)
-            if el.is_displayed():
-                renew_btn = el
-                break
-        except:
-            continue
-
-    if not renew_btn:
-        result["message"] = "未找到 Renew 按钮"
-        result["screenshot"] = take_screenshot(driver, f"s{sid}-ERROR-no-renew-btn")
-        return result
-
-    # 从 onclick 提取参数（剩余天数/阈值）
-    onclick_val = renew_btn.get_attribute("onclick") or ""
-    param_match = re.search(
-        r'showRenewAlert\((\d+),\s*(\d+),\s*(true|false)\)', onclick_val
-    )
-    if param_match:
-        result["days_left"] = int(param_match.group(1))
-        result["threshold"] = int(param_match.group(2))
-        is_free = param_match.group(3) == "true"
-        print(
-            f"[INFO] [{sid}] 到期剩余: {result['days_left']} 天, "
-            f"续期阈值: ≤{result['threshold']} 天, 免费服务: {is_free}"
-        )
-
-    # ── 点击 Renew ──
-    print(f"[INFO] [{sid}] 🔄 点击 Renew 按钮...")
-    renew_btn.click()
-    time.sleep(2)
-    take_screenshot(driver, f"s{sid}-02-renew-clicked")
-
-    # ── 检测限制弹窗 ──
-    is_restricted, alert_text, popup_days, _ = detect_restricted_popup(driver)
-    if is_restricted:
-        days_info = popup_days or result["days_left"]
-        print(f"[INFO] [{sid}] ⚠️ Renewal Restricted: {alert_text}")
-        take_screenshot(driver, f"s{sid}-03-restricted")
-        close_any_modal(driver)
-        result["skipped"] = True
-        result["days_left"] = days_info
-        result["message"] = (
-            f"未到续期窗口期，距到期还有 {days_info} 天（需 ≤{result['threshold']} 天）"
-            if days_info and result["threshold"]
-            else "未到续期窗口期（Renewal Restricted）"
-        )
-        # 截图仍刷新管理页
-        driver.get(manage_url)
+        page.get(self.LOGIN_URL)
         time.sleep(2)
-        result["due_after"], _ = get_current_due_date(driver)
-        result["screenshot"] = take_screenshot(driver, f"s{sid}-04-skipped-final")
+
+        # 缓存命中：已登录
+        if 'dashboard' in page.url or 'service' in page.url:
+            log(f"✨ [{self.email}] 浏览器缓存生效，已处于登录后台")
+            return True
+
+        # 前置过盾
+        solver.solve(timeout=8)
+        time.sleep(random.uniform(2, 4))
+
+        if 'dashboard' in page.url or 'service' in page.url:
+            log(f"✨ [{self.email}] 过盾后自动跳转，判定登录成功")
+            return True
+
+        # 填写表单
+        try:
+            email_ele = (
+                page.ele('css:input[type="email"]', timeout=10) or
+                page.ele('css:input[name*="email"]') or
+                page.ele('css:input[name*="username"]') or
+                page.ele('css:input[placeholder*="邮箱"]') or
+                page.ele('css:input[placeholder*="Email"]')
+            )
+            if not email_ele:
+                raise Exception("无法定位账号输入框")
+
+            email_ele.click()
+            email_ele.clear()
+            for char in self.email:
+                email_ele.input(char, clear=False)
+                time.sleep(random.uniform(0.05, 0.12))
+
+            pwd_ele = (
+                page.ele('css:input[type="password"]') or
+                page.ele('css:input[name*="password"]') or
+                page.ele('css:input[placeholder*="密码"]') or
+                page.ele('css:input[placeholder*="Password"]')
+            )
+            if pwd_ele:
+                pwd_ele.click()
+                pwd_ele.clear()
+                for char in self.password:
+                    pwd_ele.input(char, clear=False)
+                    time.sleep(random.uniform(0.05, 0.12))
+
+        except Exception as e:
+            log(f"❌ 填写表单失败: {e}")
+            pic = _screenshot(page, f"err_form_{self.safe_email}.png")
+            send_tg_photo(self.tg_token, self.tg_chat_id, pic,
+                          f"❌ <b>{self.email}</b> 填写表单失败\n{e}\nURL: {page.url}")
+            return False
+
+        # 登录表单过盾
+        solver.solve()
+
+        if 'dashboard' in page.url or 'service' in page.url:
+            log(f"✅ [{self.email}] 登录成功")
+            return True
+
+        # 点击提交
+        try:
+            btn = (
+                page.ele('css:button[type="submit"]') or
+                page.ele('xpath://button[contains(text(),"Sign in")]') or
+                page.ele('xpath://button[contains(text(),"登录")]')
+            )
+            if btn:
+                btn.click()
+            else:
+                raise Exception("找不到提交按钮")
+        except Exception as e:
+            log(f"❌ 点击登录按钮失败: {e}")
+            return False
+
+        time.sleep(5)
+
+        if 'dashboard' in page.url or 'service' in page.url:
+            log(f"✅ [{self.email}] 登录成功")
+            return True
+
+        log(f"❌ [{self.email}] 登录失败，当前 URL: {page.url}")
+        pic = _screenshot(page, f"err_login_{self.safe_email}.png")
+        send_tg_photo(self.tg_token, self.tg_chat_id, pic,
+                      f"❌ <b>{self.email}</b> 登录失败\nURL: {page.url}")
+        return False
+
+    # ── 获取服务列表 ──────────────────────────────
+    def get_services(self) -> list[dict]:
+        page = self.page
+        log(f"📋 [{self.email}] 获取服务列表...")
+        page.get(self.DASHBOARD_URL)
+        time.sleep(3)
+
+        services = []
+        try:
+            links = page.eles('css:a[href*="/service/"][href*="/manage"]')
+            for link in links:
+                href = link.attr('href') or ''
+                m = re.search(r'/service/(\d+)/manage', href)
+                if m:
+                    sid = m.group(1)
+                    if not any(s['id'] == sid for s in services):
+                        services.append({'id': sid})
+        except Exception as e:
+            log(f"⚠️ 抓取服务链接失败: {e}")
+        return services
+
+    # ── 单服务续期 ────────────────────────────────
+    def renew_service(self, service_id: str) -> dict:
+        """
+        返回 dict 字段：
+          service_id   str
+          success      bool
+          skipped      bool   — 触发 Renewal Restricted（未到窗口期）
+          message      str
+          invoice_id   str
+          days_left    int|None
+          threshold    int|None
+          due_before   str    — 续期前到期日（原始）
+          due_after    str    — 续期后到期日（原始）
+        """
+        page = self.page
+        result = {
+            'service_id': service_id,
+            'success': False,
+            'skipped': False,
+            'message': '',
+            'invoice_id': '',
+            'days_left': None,
+            'threshold': None,
+            'due_before': 'N/A',
+            'due_after':  'N/A',
+        }
+
+        log(f"🔄 [{service_id}] 续期服务...")
+        manage_url = f"{self.BASE}/service/{service_id}/manage"
+        page.get(manage_url)
+        time.sleep(3)
+
+        # ── 续期前到期时间 ───────────────────────
+        due_before_raw, due_before_std = _get_due_date(page)
+        result['due_before'] = due_before_raw
+        log(f"[{service_id}] 📅 续期前到期: {due_before_raw}")
+
+        # 获取 CSRF token
+        token = ''
+        token_ele = page.ele('css:input[name="_token"]')
+        if token_ele:
+            token = token_ele.value
+
+        # ── 定位 Renew 按钮 ──────────────────────
+        renew_btn = None
+        for sel in [
+            'css:button[onclick*="showRenewAlert"]',
+            'xpath://button[.//i[contains(@class,"bx-recycle")]]',
+            'xpath://button[normalize-space()="Renew"]',
+            'xpath://button[contains(text(),"Renew")]',
+            'css:[data-action*="renew"]',
+        ]:
+            try:
+                el = page.ele(sel, timeout=3)
+                if el:
+                    renew_btn = el
+                    break
+            except Exception:
+                pass
+
+        if not renew_btn:
+            log(f"❌ [{service_id}] 未找到 Renew 按钮")
+            pic = _screenshot(page, f"err_no_renew_{service_id}_{self.safe_email}.png")
+            result['message'] = '未找到 Renew 按钮'
+            send_tg_photo(self.tg_token, self.tg_chat_id, pic,
+                          f"❌ <b>{self.email}</b>\n服务 #{service_id} 未找到 Renew 按钮")
+            return result
+
+        # ── 从 onclick 预读参数 ───────────────────
+        # showRenewAlert(days_left, threshold, is_free)
+        onclick_val = renew_btn.attr('onclick') or ''
+        pm = re.search(r'showRenewAlert\((\d+),\s*(\d+),\s*(true|false)\)', onclick_val)
+        if pm:
+            result['days_left'] = int(pm.group(1))
+            result['threshold'] = int(pm.group(2))
+            log(f"[{service_id}] onclick → 剩余 {result['days_left']} 天，"
+                f"阈值 ≤{result['threshold']} 天，免费: {pm.group(3)}")
+
+        # ── 点击 Renew ───────────────────────────
+        log(f"[{service_id}] 🖱️ 点击 Renew 按钮...")
+        renew_btn.click()
+        time.sleep(2)
+
+        # ── 检测 Renewal Restricted 弹窗 ─────────
+        # F12 结构：.fixed.inset-0 > div > h3 / p / div.flex.justify-end > button(OK)
+        restricted = False
+        try:
+            h3_text = page.run_js(
+                "var el=document.querySelector('.fixed.inset-0 h3');"
+                "return el?el.textContent.trim():'';"
+            )
+            if h3_text and 'Renewal Restricted' in h3_text:
+                restricted = True
+                p_text = page.run_js(
+                    "var el=document.querySelector('.fixed.inset-0 p');"
+                    "return el?el.textContent.trim():'';"
+                ) or ''
+                log(f"⚠️ [{service_id}] Renewal Restricted: {p_text}")
+
+                dm = re.search(r'expires in (\d+) day', p_text, re.IGNORECASE)
+                if dm:
+                    result['days_left'] = int(dm.group(1))
+
+                # 关闭弹窗：优先点 OK，失败则 JS remove
+                try:
+                    ok_btn = page.ele('xpath://button[contains(text(),"OK")]', timeout=3)
+                    if ok_btn:
+                        ok_btn.click()
+                        time.sleep(0.5)
+                except Exception:
+                    page.run_js("var el=document.querySelector('.fixed.inset-0');if(el)el.remove();")
+
+        except Exception as e:
+            log(f"⚠️ [{service_id}] 检测弹窗异常: {e}")
+
+        if restricted:
+            days = result['days_left']
+            thr  = result['threshold']
+            msg  = (
+                f"未到续期窗口期，距到期还有 {days} 天（需 ≤{thr} 天可续）"
+                if days is not None and thr is not None
+                else "未到续期窗口期（Renewal Restricted）"
+            )
+            result['skipped'] = True
+            result['message'] = msg
+            result['due_after'] = due_before_raw   # 未续期，到期日不变
+            log(f"⏰ [{service_id}] {msg}")
+            pic = _screenshot(page, f"skip_{service_id}_{self.safe_email}.png")
+            send_tg_photo(
+                self.tg_token, self.tg_chat_id, pic,
+                f"⏰ <b>{self.email}</b>\n服务 #{service_id} 暂不可续期\n"
+                f"{msg}\n到期: {due_before_raw}"
+            )
+            return result
+
+        # ── 正常续期：等待并点击 Create Invoice ──
+        log(f"[{service_id}] 📦 等待续期模态框...")
+        modal_opened = False
+        for sel in [
+            f'css:div#renewService-{service_id}',
+            'css:div[id^="renewService-"]',
+            'css:div[role="dialog"]',
+            'css:.modal:not([style*="display: none"])',
+        ]:
+            try:
+                el = page.ele(sel, timeout=8)
+                if el:
+                    modal_opened = True
+                    log(f"[{service_id}] 模态框已就绪 ({sel})")
+                    break
+            except Exception:
+                pass
+
+        if not modal_opened:
+            if 'invoice' in page.url:
+                log(f"[{service_id}] ✅ 直接跳转到发票页")
+            else:
+                log(f"❌ [{service_id}] 未检测到续期模态框")
+                pic = _screenshot(page, f"err_no_modal_{service_id}_{self.safe_email}.png")
+                result['message'] = '未找到续期模态框'
+                send_tg_photo(self.tg_token, self.tg_chat_id, pic,
+                              f"❌ <b>{self.email}</b>\n服务 #{service_id} 未找到续期模态框")
+                return result
+
+        if 'invoice' not in page.url:
+            invoice_btn = None
+            for sel in [
+                'xpath://button[contains(text(),"Create Invoice")]',
+                'xpath://button[contains(text(),"Confirm")]',
+                f'xpath://div[@id="renewService-{service_id}"]//button[@type="submit"]',
+                'css:div[id^="renewService-"] button[type="submit"]',
+                'xpath://div[@role="dialog"]//button[@type="submit"]',
+            ]:
+                try:
+                    el = page.ele(sel, timeout=3)
+                    if el:
+                        invoice_btn = el
+                        break
+                except Exception:
+                    pass
+
+            if not invoice_btn:
+                log(f"❌ [{service_id}] 未找到 Create Invoice 按钮")
+                pic = _screenshot(page, f"err_no_invoice_btn_{service_id}_{self.safe_email}.png")
+                result['message'] = '未找到 Create Invoice 按钮'
+                send_tg_photo(self.tg_token, self.tg_chat_id, pic,
+                              f"❌ <b>{self.email}</b>\n服务 #{service_id} 未找到 Create Invoice 按钮")
+                return result
+
+            log(f"[{service_id}] 📦 点击 Create Invoice...")
+            invoice_btn.click()
+            time.sleep(4)
+
+        # ── 发票页处理 ───────────────────────────
+        if 'invoice' in page.url:
+            m = re.search(r'/invoice/([a-f0-9\-]+)', page.url)
+            invoice_id = m.group(1)[:8] if m else ''
+            log(f"[{service_id}] 💳 发票页: {invoice_id or '(无ID)'}")
+            result['invoice_id'] = invoice_id
+
+            # 尝试点击 Apply Credit / Pay（免费服务通常自动完成，有按钮就点）
+            for sel in [
+                'xpath://button[contains(text(),"Apply Credit")]',
+                'xpath://button[contains(text(),"Pay Now")]',
+                'xpath://button[contains(text(),"Pay")]',
+                'xpath://a[contains(text(),"Pay")]',
+            ]:
+                try:
+                    el = page.ele(sel, timeout=3)
+                    if el:
+                        log(f"[{service_id}] 💰 点击: {el.text.strip()}")
+                        el.click()
+                        time.sleep(5)
+                        break
+                except Exception:
+                    pass
+
+            # ── 回管理页，对比到期日作二次验证 ──
+            log(f"[{service_id}] 🔄 刷新管理页，等待到期日更新...")
+            page.get(manage_url)
+            time.sleep(3)
+
+            due_after_raw, due_after_std = _get_due_date(page)
+            result['due_after'] = due_after_raw
+            log(f"[{service_id}] 📅 续期后到期: {due_after_raw}")
+            # 输出标准格式供外部解析
+            if due_after_std:
+                log(f"到期时间(标准): {due_after_std}")
+
+            # 日期向后推移 = 确认成功；否则保守标记"请确认"
+            if due_after_std and due_before_std and due_after_std > due_before_std:
+                result['success'] = True
+                result['message'] = f'续期成功（{due_before_raw} → {due_after_raw}）'
+            elif due_after_std and due_before_std and due_after_std == due_before_std:
+                # 日期未变：发票页已到达，但日期未更新（可能需要稍等）
+                log(f"⚠️ [{service_id}] 到期日暂未变化，等待 10s 后再次确认...")
+                time.sleep(10)
+                page.get(manage_url)
+                time.sleep(3)
+                due_after_raw2, due_after_std2 = _get_due_date(page)
+                if due_after_std2 and due_before_std and due_after_std2 > due_before_std:
+                    result['due_after'] = due_after_raw2
+                    result['success'] = True
+                    result['message'] = f'续期成功（{due_before_raw} → {due_after_raw2}）'
+                else:
+                    result['success'] = True   # 发票页已达，保守判成功
+                    result['message'] = f'续期已执行（发票 {invoice_id}，到期日待更新）'
+                    result['due_after'] = due_after_raw2
+            else:
+                result['success'] = True       # 无法比较时以发票页为准
+                result['message'] = f'续期已执行（发票 {invoice_id}）'
+
+            pic = _screenshot(page, f"success_{service_id}_{self.safe_email}.png")
+            due_change = (
+                f"{due_before_raw} → {result['due_after']}"
+                if result['due_after'] not in ('N/A', due_before_raw)
+                else result['due_after']
+            )
+            send_tg_photo(
+                self.tg_token, self.tg_chat_id, pic,
+                f"✅ <b>{self.email}</b>\n服务 #{service_id} {result['message']}\n"
+                f"到期: {due_change}"
+                + (f"\n发票: <code>{invoice_id}</code>" if invoice_id else "")
+            )
+            return result
+
+        # ── UI 失败 → API POST 保底 ──────────────
+        log(f"📡 [{service_id}] 启动 API POST 保底方案...")
+        try:
+            s = requests.Session()
+            for ck in page.cookies():
+                s.cookies.set(ck.get('name', ''), ck.get('value', ''),
+                              domain=ck.get('domain', ''))
+
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Origin': self.BASE,
+                'Referer': manage_url,
+                'User-Agent': page.user_agent,
+            }
+            proxies = (
+                {'http': f'socks5://{self.proxy}', 'https': f'socks5://{self.proxy}'}
+                if self.proxy else None
+            )
+            resp = s.post(
+                f"{self.BASE}/service/{service_id}/renew",
+                data={'_token': token, 'days': '7'},
+                headers=headers,
+                proxies=proxies,
+                timeout=20,
+                allow_redirects=False,
+            )
+
+            redirect_url = ''
+            if resp.status_code in (301, 302, 303, 307, 308):
+                redirect_url = resp.headers.get('Location', '')
+            elif resp.status_code == 200:
+                redirect_url = resp.url
+
+            if 'invoice' in redirect_url:
+                m = re.search(r'/invoice/([a-f0-9\-]+)', redirect_url)
+                invoice_id = m.group(1)[:8] if m else ''
+
+                # 刷新管理页，对比日期
+                page.get(manage_url)
+                time.sleep(3)
+                due_after_raw, due_after_std = _get_due_date(page)
+                result['due_after'] = due_after_raw
+                if due_after_std:
+                    log(f"到期时间(标准): {due_after_std}")
+
+                result['success'] = True
+                result['invoice_id'] = invoice_id
+                due_change = (
+                    f"{due_before_raw} → {due_after_raw}"
+                    if due_after_raw not in ('N/A', due_before_raw)
+                    else due_after_raw
+                )
+                result['message'] = f'续期成功（POST 保底，{due_change}）'
+
+                pic = _screenshot(page, f"success_post_{service_id}_{self.safe_email}.png")
+                send_tg_photo(
+                    self.tg_token, self.tg_chat_id, pic,
+                    f"✅ <b>{self.email}</b>\n服务 #{service_id} 续期成功（POST 保底）\n"
+                    f"到期: {due_change}"
+                    + (f"\n发票: <code>{invoice_id}</code>" if invoice_id else "")
+                )
+            else:
+                result['message'] = (
+                    f"POST 响应异常: HTTP {resp.status_code}，"
+                    f"Location: {redirect_url or '无'}"
+                )
+
+        except Exception as e:
+            result['message'] = f'POST 异常: {e}'
+
+        # ── 最终失败通知 ─────────────────────────
+        if not result['success']:
+            log(f"❌ [{service_id}] 续期失败: {result['message']}")
+            pic = _screenshot(page, f"fail_{service_id}_{self.safe_email}.png")
+            send_tg_photo(
+                self.tg_token, self.tg_chat_id, pic,
+                f"❌ <b>{self.email}</b>\n服务 #{service_id} 续期失败\n"
+                f"原因: {result['message']}\n到期: {due_before_raw}"
+            )
+
         return result
 
-    # ── 正常续期：等待模态框 ──
-    print(f"[INFO] [{sid}] 📦 等待续期模态框...")
-
-    # 尝试多种模态框选择器
-    modal_found = False
-    modal_selectors = [
-        f"div#renewService-{sid}",
-        "div[id^='renewService-']",
-        ".modal:not([style*='display: none'])",
-        "div[role='dialog']",
-    ]
-    for sel in modal_selectors:
+    # ── 入口 ──────────────────────────────────────
+    def run(self) -> list[dict]:
         try:
-            driver.wait_for_element_visible(sel, timeout=8)
-            modal_found = True
-            print(f"[INFO] [{sid}] 模态框已打开 (selector: {sel})")
-            break
-        except:
-            continue
+            if not self.login():
+                pic = _screenshot(self.page, f"err_login_final_{self.safe_email}.png")
+                send_tg_photo(self.tg_token, self.tg_chat_id, pic,
+                              f"❌ <b>{self.email}</b> 登录失败，终止续期")
+                return [{'service_id': 'N/A', 'success': False, 'skipped': False,
+                         'message': '登录失败', 'invoice_id': '',
+                         'days_left': None, 'threshold': None}]
 
-    if not modal_found:
-        # 可能页面直接跳转（某些情况下无模态框）
-        if "invoice" in driver.current_url:
-            print(f"[INFO] [{sid}] ✅ 直接跳转到发票页，无需点击 Create Invoice")
-            result["success"] = True
-            result["message"] = "续期成功（直接跳转发票）"
-        else:
-            result["message"] = "未找到续期模态框"
-            result["screenshot"] = take_screenshot(driver, f"s{sid}-ERROR-no-modal")
-            return result
+            services = self.get_services()
+            if not services:
+                return [{'service_id': 'N/A', 'success': False, 'skipped': False,
+                         'message': '未找到服务', 'invoice_id': '',
+                         'days_left': None, 'threshold': None}]
 
-    if not result["success"]:
-        take_screenshot(driver, f"s{sid}-03-modal-opened")
+            results = []
+            for svc in services:
+                results.append(self.renew_service(svc['id']))
+                time.sleep(3)
+            return results
 
-        # ── 点击 Create Invoice ──
-        print(f"[INFO] [{sid}] 📦 点击 Create Invoice...")
-        invoice_btn = None
-        invoice_selectors = [
-            ("xpath", "//button[contains(text(),'Create Invoice')]"),
-            ("xpath", "//button[contains(text(),'Confirm')]"),
-            ("xpath", f"//div[@id='renewService-{sid}']//button[@type='submit']"),
-            ("css selector", "div[id^='renewService-'] button[type='submit']"),
-            ("xpath", "//div[contains(@class,'modal')]//button[@type='submit']"),
-            ("xpath", "//div[@role='dialog']//button[@type='submit']"),
-        ]
-        for by, val in invoice_selectors:
-            try:
-                el = driver.find_element(by, val)
-                if el.is_displayed():
-                    invoice_btn = el
-                    break
-            except:
-                continue
+        except Exception as e:
+            log(f"❌ run() 异常: {e}")
+            if self.page:
+                pic = _screenshot(self.page, f"err_crash_{self.safe_email}.png")
+                send_tg_photo(self.tg_token, self.tg_chat_id, pic,
+                              f"❌ <b>{self.email}</b> 脚本异常崩溃\n{str(e)[:200]}")
+            raise
 
-        if not invoice_btn:
-            result["message"] = "未找到 Create Invoice 按钮"
-            result["screenshot"] = take_screenshot(driver, f"s{sid}-ERROR-no-invoice-btn")
-            return result
-
-        invoice_btn.click()
-        print(f"[INFO] [{sid}] ✅ Create Invoice 已点击，等待跳转...")
-        time.sleep(4)
-        take_screenshot(driver, f"s{sid}-04-invoice-submitted")
-
-    # ── 判断是否跳转到发票页 ──
-    if "invoice" in driver.current_url:
-        m = re.search(r'/invoice/([a-f0-9\-]+)', driver.current_url)
-        invoice_id = m.group(1)[:8] if m else "unknown"
-        print(f"[INFO] [{sid}] 💳 发票页: {invoice_id}")
-        take_screenshot(driver, f"s{sid}-05-invoice-page")
-
-        # 免费服务：发票页自动处理，无需支付，稍等后刷新确认
-        # 如果存在 Pay / Apply Credit 按钮，也尝试点击
-        pay_selectors = [
-            ("xpath", "//button[contains(text(),'Apply Credit')]"),
-            ("xpath", "//button[contains(text(),'Pay Now')]"),
-            ("xpath", "//button[contains(text(),'Pay')]"),
-            ("xpath", "//a[contains(text(),'Pay')]"),
-            ("xpath", "//button[contains(text(),'Confirm')]"),
-        ]
-        for by, val in pay_selectors:
-            try:
-                el = driver.find_element(by, val)
-                if el.is_displayed():
-                    print(f"[INFO] [{sid}] 💰 点击支付按钮: {el.text.strip()}")
-                    el.click()
-                    time.sleep(5)
-                    take_screenshot(driver, f"s{sid}-06-pay-clicked")
-                    break
-            except:
-                continue
-
-        result["success"] = True
-        result["message"] = f"续期成功（发票 {invoice_id}）"
-    else:
-        # 未跳转发票页，可能已在当前页完成
-        time.sleep(3)
-        if "invoice" in driver.current_url:
-            result["success"] = True
-            result["message"] = "续期成功"
-        else:
-            print(f"[WARN] [{sid}] 未跳转发票页，当前 URL: {driver.current_url}")
-            take_screenshot(driver, f"s{sid}-WARN-no-redirect")
-            result["message"] = f"续期已执行，但未跳转发票页（请确认）"
-            result["success"] = False  # 保守处理
-
-    # ── 刷新管理页获取续期后到期时间 ──
-    driver.get(manage_url)
-    time.sleep(3)
-    result["due_after"], due_after_std = get_current_due_date(driver)
-    print(f"[INFO] [{sid}] 续期后到期: {result['due_after']}")
-
-    # 输出标准格式供 Cron 解析
-    if due_after_std:
-        print(f"到期时间(标准): {due_after_std}")
-
-    result["screenshot"] = take_screenshot(driver, f"s{sid}-99-final")
-    return result
-
-
-# ====================== 主逻辑 ======================
-def main():
-    print("[INFO] " + "=" * 50)
-    print("[INFO] HidenCloud 自动续期脚本 (SeleniumBase)")
-    print("[INFO] " + "=" * 50)
-    print(f"[INFO] 📂 状态目录: {USER_DATA_DIR}")
-    print(f"[INFO] 📸 截图目录: {SCREENSHOT_DIR}")
-
-    driver_kwargs = {
-        "headless": True,
-        "uc": True,
-        "user_data_dir": USER_DATA_DIR,
-        "window_size": "1280,753",
-    }
-    if PROXY_SERVER:
-        driver_kwargs["proxy"] = PROXY_SERVER
-        print(f"[INFO] 🌐 使用代理: {PROXY_SERVER}")
-
-    driver = Driver(**driver_kwargs)
-
-    try:
-        # ---------- 1. 访问主页 ----------
-        print(f"[INFO] 🌐 访问主页: {BASE_URL}/dashboard")
-        driver.get(f"{BASE_URL}/dashboard")
-        time.sleep(3)
-        take_screenshot(driver, "01-initial")
-
-        # ---------- 2. 登录判断 ----------
-        if "/auth/login" in driver.current_url or driver.is_element_visible("input#username"):
-            print("[INFO] 🔒 检测到未登录，开始登录流程")
-            take_screenshot(driver, "02-login-page")
-
-            masked_email = mask_email(HIDEN_EMAIL)
-            print(f"[INFO] ✍️ 填写邮箱: {masked_email}")
-            driver.type("input#username", HIDEN_EMAIL)
-            driver.type("input#password", HIDEN_PWD)
-            take_screenshot(driver, "03-credentials-filled")
-
-            print("[INFO] ⏳ 等待 Turnstile 加载...")
-            time.sleep(5)
-
-            if driver.is_element_present(".cf-turnstile"):
-                print("[INFO] 🖱️ 尝试点击 Turnstile...")
+        finally:
+            if self.page:
                 try:
-                    driver.uc_gui_click_cf(".cf-turnstile")
-                except:
-                    driver.click(".cf-turnstile")
-                take_screenshot(driver, "04-turnstile-clicked")
+                    self.page.quit()
+                except Exception:
+                    pass
 
-                if not wait_for_turnstile_token(driver, timeout=90):
-                    take_screenshot(driver, "ERROR-turnstile-timeout")
-                    raise Exception("Turnstile 验证超时")
-                take_screenshot(driver, "05-token-ready")
-            else:
-                print("[WARN] 未找到 Turnstile 元素，继续提交...")
 
-            print("[INFO] 🚀 提交登录表单")
-            driver.click("button[type='submit']")
-            take_screenshot(driver, "06-login-submitted")
+# ─────────────────────────────────────────────
+#  主入口
+# ─────────────────────────────────────────────
 
-            print("[INFO] ⏳ 等待登录跳转...")
-            if not wait_for_url_contains(driver, "/dashboard", timeout=45):
-                error_text = check_login_error(driver)
-                if error_text:
-                    take_screenshot(driver, "ERROR-login-failed-message")
-                    raise Exception(f"登录失败: {error_text}")
-                else:
-                    time.sleep(5)
-                    if "/dashboard" not in driver.current_url:
-                        take_screenshot(driver, "ERROR-login-stuck")
-                        raise Exception("登录后卡住，未跳转")
+def main():
+    accounts_raw = os.getenv('ACCOUNTS', '').strip()
+    tg_token     = os.getenv('TG_BOT_TOKEN', '').strip()
+    tg_chat_id   = os.getenv('TG_CHAT_ID', '').strip()
+    proxy        = os.getenv('PROXY', '').strip()
 
-            print("[INFO] ✅ 登录成功")
-            take_screenshot(driver, "07-login-success")
-        else:
-            print("[INFO] ✅ 已登录，跳过登录流程")
-            take_screenshot(driver, "02-already-logged-in")
+    if not accounts_raw:
+        log("❌ ACCOUNTS 环境变量为空")
+        sys.exit(1)
 
-        # ---------- 3. 提取所有服务 ID ----------
-        print("[INFO] 🔍 提取服务器 ID 列表...")
-        time.sleep(3)
-        take_screenshot(driver, "08-dashboard")
+    accounts = parse_accounts(accounts_raw)
+    if not accounts:
+        log("❌ 未解析到任何账号")
+        sys.exit(1)
 
-        sids = get_all_service_ids(driver)
-        if not sids:
-            take_screenshot(driver, "ERROR-no-service-ids")
-            raise Exception("无法提取任何服务 ID")
+    all_results = []
+    account_summaries = []
 
-        print(f"[INFO] ✅ 共找到 {len(sids)} 个服务")
+    for email, password in accounts:
+        log(f"\n🚀 开始处理: {email}")
+        renewer = HidenCloudRenewer(email, password, proxy, tg_token, tg_chat_id)
+        results = renewer.run()
+        all_results.extend(results)
 
-        # ---------- 4. 逐一续期 ----------
-        all_results = []
-        for sid in sids:
-            print(f"\n[INFO] {'─'*40}")
-            print(f"[INFO] 开始处理服务 #{sid}")
-            res = renew_one_service(driver, sid)
-            res["sid"] = sid
-            all_results.append(res)
-            # 每个服务完成后立即发 TG 通知（含截图）
-            notify_service_result(sid, res)
-            time.sleep(2)
-
-        # ---------- 5. 汇总并发送 TG 通知 ----------
-        bj_time = get_bj_time()
-        total_ok = sum(1 for r in all_results if r["success"])
-        total_skip = sum(1 for r in all_results if r["skipped"])
-        total_fail = len(all_results) - total_ok - total_skip
-
-        lines = [
-            f"🔔 *HidenCloud 续期报告*",
-            f"账号: `{HIDEN_EMAIL}`",
-            f"✅ 成功 {total_ok} | ⏰ 跳过 {total_skip} | ❌ 失败 {total_fail}",
-            "",
-        ]
-        for r in all_results:
-            if r["success"]:
+        lines = [f"📧 <b>{email}</b>"]
+        for r in results:
+            if r.get('success'):
                 icon = "✅"
-            elif r["skipped"]:
+            elif r.get('skipped'):
                 icon = "⏰"
             else:
                 icon = "❌"
+            inv  = f" | 发票: <code>{r['invoice_id']}</code>" if r.get('invoice_id') else ""
+            days_info = ""
+            if r.get('skipped') and r.get('days_left') is not None:
+                thr = r.get('threshold')
+                days_info = f"（剩余 {r['days_left']} 天，需 ≤{thr} 天）" if thr else f"（剩余 {r['days_left']} 天）"
+            lines.append(f"  {icon} 服务 #{r['service_id']}: {r['message']}{inv}{days_info}")
+        account_summaries.append('\n'.join(lines))
 
-            due_change = r["due_before"]
-            if r["due_after"] != "N/A" and r["due_after"] != r["due_before"]:
-                due_change = f"{r['due_before']} → {r['due_after']}"
-            elif r["due_after"] != "N/A":
-                due_change = r["due_after"]
+    total_ok   = sum(1 for r in all_results if r.get('success'))
+    total_skip = sum(1 for r in all_results if r.get('skipped'))
+    total_fail = len(all_results) - total_ok - total_skip
 
-            extra = ""
-            if r["skipped"] and r["days_left"] is not None:
-                extra = f"（剩余 {r['days_left']} 天，需 ≤{r['threshold']} 天可续）"
-
-            lines.append(
-                f"{icon} 服务 `#{r['sid']}`: {r['message']}{extra}\n"
-                f"   到期: {due_change}"
-            )
-
-        lines.append(f"\n时间: {bj_time}")
-        lines.append("HidenCloud Auto Renew")
-        tg_msg = "\n".join(lines)
-
-        # 汇总只发文字，各服务已单独发过截图
-        send_tg_notification(tg_msg)
-
-        print(f"\n[INFO] 🎉 所有任务完成 — ✅{total_ok} ⏰{total_skip} ❌{total_fail}")
-
-    except Exception as e:
-        print(f"[ERROR] ❌ 脚本执行失败: {e}")
-        err_pic = take_screenshot(driver, "CRITICAL-ERROR")
-        send_tg_notification(
-            f"❌ *HidenCloud 脚本异常崩溃*\n\n"
-            f"账号: `{HIDEN_EMAIL}`\n"
-            f"错误: `{str(e)[:300]}`\n"
-            f"时间: {get_bj_time()}",
-            photo_path=err_pic,
-        )
-        raise
-    finally:
-        driver.quit()
+    tg_msg = (
+        f"🔔 <b>HidenCloud 续期总报告</b>\n"
+        f"📊 ✅ 成功 {total_ok} | ⏰ 跳过 {total_skip} | ❌ 失败 {total_fail}\n\n"
+        + '\n\n'.join(account_summaries)
+    )
+    send_tg(tg_token, tg_chat_id, tg_msg)
+    log("🏁 全部账号处理完毕")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
