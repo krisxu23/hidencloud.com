@@ -3,9 +3,8 @@ name: HidenCloud Auto Renew
 on:
   workflow_dispatch:
   schedule:
-    - cron: '28 3 * * 2'  # Tue 北京时间 11:28
-    - cron: '56 2 * * 4'  # Thu 北京时间 10:56
-    - cron: '41 5 * * 6'  # Sat 北京时间 13:41
+    # 初始默认一个时间（例如：北京时间每天 03:25，即 UTC 前一天 19:25）
+    - cron: '25 19 * * *'
 
 jobs:
   renew:
@@ -15,6 +14,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          # 必须使用具备 'workflow' 权限的 Personal Access Token 才能让修改后的 cron 生效
           token: ${{ secrets.GH_TOKEN }}
 
       - name: Set up Python
@@ -37,7 +37,9 @@ jobs:
             libasound2t64 \
             libatspi2.0-0 \
             libxshmfence1 \
-            fonts-liberation
+            fonts-liberation \
+            libxrender1 \
+            libxtst6
 
       - name: Install Python Dependencies
         run: |
@@ -87,105 +89,71 @@ jobs:
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python main.py
 
-      - name: Schedule next random run
+      - name: Schedule next daily random run
         if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           python3 << 'PYEOF'
-          import random, re, json, os
-          from datetime import datetime, timezone
+          import random
+          import re
+          import os
+          from datetime import datetime, timedelta, timezone
 
-          STATE_FILE = ".github/workflows/renew_schedule.json"
-          YML_PATH   = ".github/workflows/hidencloud-auto-renew.yml"
-          day_names  = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
+          YML_PATH = ".github/workflows/hidencloud-auto-renew.yml"
 
-          def pick_three_days():
-              while True:
-                  days = sorted(random.sample(range(7), 3))
-                  if (days[1] - days[0]) >= 2 and (days[2] - days[1]) >= 2:
-                      return days
+          # 1. 随机生成明天北京时间的 时(1-7) 和 分(0-59)
+          # 注意：为了绝对安全不压线，时段设为 1 点到 7 点 59 分之间
+          bj_h = random.randint(1, 7)
+          bj_m = random.randint(0, 59)
 
-          def make_cron(m, h, d):
-              return f"{m} {h} * * {(d+1)%7}"
+          # 2. 计算对应的 UTC 时间
+          # 假设明天的北京时间
+          bj_tz = timezone(timedelta(hours=8))
+          now_bj = datetime.now(bj_tz)
+          tomorrow_bj = now_bj + timedelta(days=1)
+          target_bj = tomorrow_bj.replace(hour=bj_h, minute=bj_m, second=0, microsecond=0)
+          
+          # 转换成 UTC
+          target_utc = target_bj.astimezone(timezone.utc)
+          
+          cron_m = target_utc.minute
+          cron_h = target_utc.hour
 
-          def gen_schedule():
-              days = pick_three_days()
-              slots = []
-              for d in days:
-                  h = random.randint(0, 14)
-                  m = random.randint(0, 59)
-                  slots.append({"day": d, "h": h, "m": m, "done": False})
-              return slots
+          # 3. 生成新的 Cron 表达式 (每天运行格式: m h * * *)
+          cron_line = f"    - cron: '{cron_m} {cron_h} * * *'  # 每天随机 北京时间 {bj_h:02d}:{bj_m:02d}"
+          print(f"🎲 针对应生成的明日排期：{cron_line.strip()}")
 
-          def update_yml(slots):
-              with open(YML_PATH, "r") as f:
+          # 4. 替换 YML 文件中的 schedule 部分
+          if os.path.exists(YML_PATH):
+              with open(YML_PATH, "r", encoding="utf-8") as f:
                   content = f.read()
-              lines = []
-              for s in slots:
-                  cron = make_cron(s["m"], s["h"], s["day"])
-                  bj_h = (s["h"] + 8) % 24
-                  lines.append(f"    - cron: '{cron}'  # {day_names[s['day']]} 北京时间 {bj_h:02d}:{s['m']:02d}")
-              new_block = "  schedule:\n" + "\n".join(lines)
+
+              new_block = "  schedule:\n" + cron_line
               content = re.sub(
                   r"  schedule:\n(?:    - cron: '[^']*'[^\n]*\n?)+",
                   new_block + "\n",
                   content,
                   count=1
               )
-              with open(YML_PATH, "w") as f:
+
+              with open(YML_PATH, "w", encoding="utf-8") as f:
                   f.write(content)
-              print("✅ yml 已更新")
-
-          if os.path.exists(STATE_FILE):
-              with open(STATE_FILE, "r") as f:
-                  state = json.load(f)
-              slots = state["slots"]
+              print("✅ YML 中的下一次 Cron 排期已成功改写")
           else:
-              slots = None
-
-          now_utc = datetime.now(timezone.utc)
-          now_day = now_utc.weekday()
-
-          if slots is None:
-              print("📅 首次运行，生成新排期")
-              slots = gen_schedule()
-              update_yml(slots)
-          else:
-              all_done = all(s["done"] for s in slots)
-
-              if all_done:
-                  print("🔄 本轮3次全部完成，生成新排期")
-                  slots = gen_schedule()
-                  update_yml(slots)
-              else:
-                  for s in slots:
-                      if not s["done"] and s["day"] == now_day:
-                          s["done"] = True
-                          print(f"✅ 标记 {day_names[s['day']]} {s['h']:02d}:{s['m']:02d} 已执行")
-                          break
-                  else:
-                      for s in slots:
-                          if not s["done"]:
-                              s["done"] = True
-                              print(f"✅ 标记 {day_names[s['day']]} {s['h']:02d}:{s['m']:02d} 已执行（按序）")
-                              break
-
-                  remaining = [s for s in slots if not s["done"]]
-                  print(f"📌 剩余未执行: {len(remaining)} 次")
-                  for s in remaining:
-                      print(f"   {day_names[s['day']]} UTC {s['h']:02d}:{s['m']:02d}")
-
-          with open(STATE_FILE, "w") as f:
-              json.dump({"slots": slots, "updated": now_utc.isoformat()}, f, indent=2)
-          print("✅ 状态已保存")
+              print(f"❌ 未找到 YML 文件: {YML_PATH}")
           PYEOF
 
+          # 5. Git 提交并推送
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/hidencloud-auto-renew.yml .github/workflows/renew_schedule.json
-          git diff --cached --quiet || git commit -m "chore: update renew schedule [skip ci]"
-          git push
+          git add .github/workflows/hidencloud-auto-renew.yml
+          
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update daily random schedule [skip ci]"
+            git push
+            echo "🚀 成功将明日随机时间推送到仓库"
+          else
+            echo "⏳ 时间巧合未改变，无需提交"
+          fi
 
       - name: Upload Debug Artifacts
         if: always()
