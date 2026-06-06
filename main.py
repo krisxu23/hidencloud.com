@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import json
 import time
 import random
 import requests
@@ -294,6 +295,7 @@ class HidenCloudRenewer:
     BASE = "https://dash.hidencloud.com"
     LOGIN_URL = f"{BASE}/auth/login"
     DASHBOARD_URL = f"{BASE}/dashboard"
+    COOKIE_DIR = os.path.join(os.getcwd(), 'hiden_cookies')
 
     def __init__(self, email: str, password: str, proxy: str = "",
                  tg_token: str = "", tg_chat_id: str = ""):
@@ -304,6 +306,68 @@ class HidenCloudRenewer:
         self.tg_chat_id = tg_chat_id
         self.page: ChromiumPage | None = None
         self.safe_email = email.replace('@', '_').replace('.', '_')
+
+    # ── Cookie 持久化 ──────────────────────────────
+    def _cookie_path(self) -> str:
+        os.makedirs(self.COOKIE_DIR, exist_ok=True)
+        return os.path.join(self.COOKIE_DIR, f"{self.safe_email}.json")
+
+    def save_cookies(self):
+        """将当前页面 cookie 序列化保存到文件"""
+        try:
+            cookies = self.page.cookies()
+            with open(self._cookie_path(), 'w', encoding='utf-8') as f:
+                json.dump(cookies, f, ensure_ascii=False, indent=2)
+            log(f"💾 [{self.email}] Cookie 已保存（{len(cookies)} 条）")
+        except Exception as e:
+            log(f"⚠️ [{self.email}] Cookie 保存失败: {e}")
+
+    def _try_cookie_login(self) -> bool:
+        """
+        从文件加载 cookie，注入浏览器后直接访问 dashboard。
+        返回 True 表示 cookie 有效、已处于登录态。
+        """
+        cookie_file = self._cookie_path()
+        if not os.path.exists(cookie_file):
+            log(f"ℹ️ [{self.email}] 无 Cookie 缓存文件，跳过 Cookie 登录")
+            return False
+
+        try:
+            with open(cookie_file, 'r', encoding='utf-8') as f:
+                cookies = json.load(f)
+            if not cookies:
+                return False
+
+            log(f"🍪 [{self.email}] 加载 Cookie 缓存（{len(cookies)} 条），尝试免密登录...")
+            page = self.page
+
+            # 先访问目标域以建立上下文，再注入 cookie
+            page.get(self.BASE)
+            time.sleep(1)
+            for ck in cookies:
+                try:
+                    page.set.cookies(ck)
+                except Exception:
+                    pass
+
+            # 访问 dashboard 验证是否已登录
+            page.get(self.DASHBOARD_URL)
+            time.sleep(3)
+
+            if 'dashboard' in page.url or 'service' in page.url:
+                log(f"✨ [{self.email}] Cookie 登录成功")
+                return True
+            else:
+                log(f"⚠️ [{self.email}] Cookie 已过期，将回退密码登录")
+                # 清除失效的 cookie 文件
+                try:
+                    os.remove(cookie_file)
+                except Exception:
+                    pass
+                return False
+        except Exception as e:
+            log(f"⚠️ [{self.email}] Cookie 登录异常: {e}")
+            return False
 
     # ── 浏览器初始化 ──────────────────────────────
     def _make_page(self) -> ChromiumPage:
@@ -339,12 +403,17 @@ class HidenCloudRenewer:
         page = self.page
         solver = TurnstileSolver(page)
 
+        # ── 优先尝试 Cookie 登录 ──────────────────
+        if self._try_cookie_login():
+            return True
+
         page.get(self.LOGIN_URL)
         time.sleep(2)
 
         # 缓存命中：已登录
         if 'dashboard' in page.url or 'service' in page.url:
             log(f"✨ [{self.email}] 浏览器缓存生效，已处于登录后台")
+            self.save_cookies()
             return True
 
         # 前置过盾
@@ -353,6 +422,7 @@ class HidenCloudRenewer:
 
         if 'dashboard' in page.url or 'service' in page.url:
             log(f"✨ [{self.email}] 过盾后自动跳转，判定登录成功")
+            self.save_cookies()
             return True
 
         # 填写表单
@@ -398,6 +468,7 @@ class HidenCloudRenewer:
 
         if 'dashboard' in page.url or 'service' in page.url:
             log(f"✅ [{self.email}] 登录成功")
+            self.save_cookies()
             return True
 
         # 点击提交
@@ -419,6 +490,7 @@ class HidenCloudRenewer:
 
         if 'dashboard' in page.url or 'service' in page.url:
             log(f"✅ [{self.email}] 登录成功")
+            self.save_cookies()
             return True
 
         log(f"❌ [{self.email}] 登录失败，当前 URL: {page.url}")
